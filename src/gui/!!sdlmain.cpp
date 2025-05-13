@@ -1,0 +1,2812 @@
+/*
+ *  Copyright (C) 2002-2011  The DOSBox Team
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+ */
+
+
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
+#include <iostream>
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <stdarg.h>
+#include <sys/types.h>
+#ifdef WIN32
+#include <signal.h>
+#include <process.h>
+#endif
+
+#include "cross.h"
+#include "SDL.h"
+
+#include "dosbox.h"
+#include "video.h"
+#include "mouse.h"
+#include "pic.h"
+#include "timer.h"
+#include "setup.h"
+#include "support.h"
+#include "debug.h"
+#include "mapper.h"
+#include "vga.h"
+#include "keyboard.h"
+#include "cpu.h"
+#include "cross.h"
+#include "control.h"
+
+//#include "crtemu.h"
+#include "crt_frame.h"
+
+extern "C" {
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+}
+
+extern "C"
+{
+	__declspec(dllimport) struct HINSTANCE__* __stdcall LoadLibraryA(char const* lpLibFileName);
+	__declspec(dllimport) int __stdcall FreeLibrary(struct HINSTANCE__* hModule);
+#if defined(_WIN64)
+	typedef __int64(__stdcall* CRTEMU_PROC)();
+	__declspec(dllimport) CRTEMU_PROC __stdcall GetProcAddress(struct HINSTANCE__* hModule, char const* lpLibFileName);
+#else
+	typedef __int32(__stdcall* CRTEMU_PROC)();
+	__declspec(dllimport) CRTEMU_PROC __stdcall GetProcAddress(struct HINSTANCE__* hModule, char const* lpLibFileName);
+#endif
+};
+
+#define CRTEMU_GLCALLTYPE __stdcall
+typedef unsigned int CRTEMU_GLuint;
+//typedef unsigned char CRTEMU_GLboolean;
+typedef float CRTEMU_GLfloat;
+typedef void CRTEMU_GLvoid;
+typedef unsigned char CRTEMU_GLubyte;
+typedef int CRTEMU_GLsizei;
+typedef unsigned int CRTEMU_GLenum;
+typedef int CRTEMU_GLint;
+typedef float CRTEMU_GLfloat;
+typedef char CRTEMU_GLchar;
+typedef unsigned char CRTEMU_GLboolean;
+typedef size_t CRTEMU_GLsizeiptr;
+typedef unsigned int CRTEMU_GLbitfield;
+
+#define CRTEMU_GL_FLOAT 0x1406
+#define CRTEMU_GL_FALSE 0
+#define CRTEMU_GL_FRAGMENT_SHADER 0x8b30
+#define CRTEMU_GL_VERTEX_SHADER 0x8b31
+#define CRTEMU_GL_COMPILE_STATUS 0x8b81
+#define CRTEMU_GL_LINK_STATUS 0x8b82
+#define CRTEMU_GL_INFO_LOG_LENGTH 0x8b84
+#define CRTEMU_GL_ARRAY_BUFFER 0x8892
+#define CRTEMU_GL_TEXTURE_2D 0x0de1
+#define CRTEMU_GL_TEXTURE0 0x84c0
+#define CRTEMU_GL_TEXTURE1 0x84c1
+#define CRTEMU_GL_TEXTURE2 0x84c2
+#define CRTEMU_GL_TEXTURE3 0x84c3
+#define CRTEMU_GL_TEXTURE_MIN_FILTER 0x2801
+#define CRTEMU_GL_TEXTURE_MAG_FILTER 0x2800
+#define CRTEMU_GL_NEAREST 0x2600
+#define CRTEMU_GL_LINEAR 0x2601
+#define CRTEMU_GL_STATIC_DRAW 0x88e4
+#define CRTEMU_GL_RGBA 0x1908
+#define CRTEMU_GL_UNSIGNED_BYTE 0x1401
+#define CRTEMU_GL_COLOR_BUFFER_BIT 0x00004000
+#define CRTEMU_GL_TRIANGLE_FAN 0x0006
+#define CRTEMU_GL_FRAMEBUFFER 0x8d40
+#define CRTEMU_GL_VIEWPORT 0x0ba2
+#define CRTEMU_GL_RGB 0x1907
+#define CRTEMU_GL_COLOR_ATTACHMENT0 0x8ce0
+#define CRTEMU_GL_TEXTURE_WRAP_S 0x2802
+#define CRTEMU_GL_TEXTURE_WRAP_T 0x2803
+#define CRTEMU_GL_CLAMP_TO_BORDER 0x812D
+#define CRTEMU_GL_TEXTURE_BORDER_COLOR 0x1004
+#define CRTEMU_GL_MODELVIEW 0x1700
+#define CRTEMU_GL_PROJECTION 0x1701
+#define CRTEMU_GL_TEXTURE 0x1702
+#define CRTEMU_GL_WRITE_PIXEL_DATA_RANGE_NV 0x8878
+#define CRTEMU_GL_READ_PIXEL_DATA_RANGE_NV 0x8879
+#define CRTEMU_GL_CLAMP 0x2900
+#define CRTEMU_GL_RGBA8 0x8058
+#define CRTEMU_GL_BGRA_EXT 0x80E1
+#define CRTEMU_GL_FLAT 0x1D00
+#define CRTEMU_GL_DEPTH_TEST 0x0B71
+#define CRTEMU_GL_LIGHTING 0x0B50
+#define CRTEMU_GL_CULL_FACE 0x0B44
+#define CRTEMU_GL_COMPILE 0x1300
+#define CRTEMU_GL_QUADS 0x0007
+#define CRTEMU_GL_MAX_TEXTURE_SIZE 0x0D33
+#define CRTEMU_GL_EXTENSIONS 0x1F03
+
+#define MAPPERFILE "mapper-" VERSION ".map"
+//#define DISABLE_JOYSTICK
+
+#if C_OPENGL
+#include "SDL_opengl.h"
+
+//#include <GL/gl.h>
+
+#define CRTEMU_IMPLEMENTATION
+#include "crtemu.h"
+
+//static crtemu_t* crtemu = 0;
+
+static crtemu_t* crtemu = crtemu_create(0);
+
+#ifndef APIENTRY
+#define APIENTRY
+#endif
+#ifndef APIENTRYP
+#define APIENTRYP APIENTRY *
+#endif
+
+#ifdef __WIN32__
+#define NVIDIA_PixelDataRange 1
+
+#ifndef WGL_NV_allocate_memory
+#define WGL_NV_allocate_memory 1
+typedef void * (APIENTRY * PFNWGLALLOCATEMEMORYNVPROC) (int size, float readfreq, float writefreq, float priority);
+typedef void (APIENTRY * PFNWGLFREEMEMORYNVPROC) (void *pointer);
+#endif
+
+PFNWGLALLOCATEMEMORYNVPROC db_glAllocateMemoryNV = NULL;
+PFNWGLFREEMEMORYNVPROC db_glFreeMemoryNV = NULL;
+
+#else
+
+#endif
+
+#if defined(NVIDIA_PixelDataRange)
+
+#ifndef GL_NV_pixel_data_range
+#define GL_NV_pixel_data_range 1
+#define GL_WRITE_PIXEL_DATA_RANGE_NV      0x8878
+typedef void (APIENTRYP PFNGLPIXELDATARANGENVPROC) (GLenum target, GLsizei length, GLvoid *pointer);
+typedef void (APIENTRYP PFNGLFLUSHPIXELDATARANGENVPROC) (GLenum target);
+#endif
+
+PFNGLPIXELDATARANGENVPROC crtemu_glPixelDataRangeNV = NULL;
+
+#endif
+
+#endif //C_OPENGL
+
+#if !(ENVIRON_INCLUDED)
+extern char** environ;
+#endif
+
+#ifdef WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#if (HAVE_DDRAW_H)
+#include <ddraw.h>
+struct private_hwdata {
+	LPDIRECTDRAWSURFACE3 dd_surface;
+	LPDIRECTDRAWSURFACE3 dd_writebuf;
+};
+#endif
+
+#define STDOUT_FILE	TEXT("stdout.txt")
+#define STDERR_FILE	TEXT("stderr.txt")
+#define DEFAULT_CONFIG_FILE "/dosbox.conf"
+#elif defined(MACOSX)
+#define DEFAULT_CONFIG_FILE "/Library/Preferences/DOSBox Preferences"
+#else /*linux freebsd*/
+#define DEFAULT_CONFIG_FILE "/.dosboxrc"
+#endif
+
+#if C_SET_PRIORITY
+#include <sys/resource.h>
+#define PRIO_TOTAL (PRIO_MAX-PRIO_MIN)
+#endif
+
+#ifdef OS2
+#define INCL_DOS
+#define INCL_WIN
+#include <os2.h>
+#endif
+
+enum SCREEN_TYPES	{
+	SCREEN_SURFACE,
+	SCREEN_SURFACE_DDRAW,
+	SCREEN_OVERLAY,
+	SCREEN_OPENGL
+};
+
+enum PRIORITY_LEVELS {
+	PRIORITY_LEVEL_PAUSE,
+	PRIORITY_LEVEL_LOWEST,
+	PRIORITY_LEVEL_LOWER,
+	PRIORITY_LEVEL_NORMAL,
+	PRIORITY_LEVEL_HIGHER,
+	PRIORITY_LEVEL_HIGHEST
+};
+
+
+struct SDL_Block {
+	bool inited;
+	bool active;							//If this isn't set don't draw
+	bool updating;
+	struct {
+		Bit32u width;
+		Bit32u height;
+		Bit32u bpp;
+		Bitu flags;
+		double scalex,scaley;
+		GFX_CallBack_t callback;
+	} draw;
+	bool wait_on_error;
+	struct {
+		struct {
+			Bit16u width, height;
+			bool fixed;
+		} full;
+		struct {
+			Bit16u width, height;
+		} window;
+		Bit8u bpp;
+		bool fullscreen;
+		bool lazy_fullscreen;
+		bool lazy_fullscreen_req;
+		bool doublebuf;
+		SCREEN_TYPES type;
+		SCREEN_TYPES want_type;
+	} desktop;
+#if C_OPENGL
+	struct {
+		Bitu pitch;
+		void * framebuf;
+		GLuint texture;
+		GLuint texture2;
+		GLuint displaylist;
+		GLint max_texsize;
+		bool bilinear;
+		bool packed_pixel;
+		bool paletted_texture;
+#if defined(NVIDIA_PixelDataRange)
+		bool pixel_data_range;
+#endif
+	} opengl;
+#endif
+	struct {
+		SDL_Surface * surface;
+#if (HAVE_DDRAW_H) && defined(WIN32)
+		RECT rect;
+#endif
+	} blit;
+	struct {
+		PRIORITY_LEVELS focus;
+		PRIORITY_LEVELS nofocus;
+	} priority;
+	SDL_Rect clip;
+	SDL_Surface * surface;
+	SDL_Overlay * overlay;
+	SDL_cond *cond;
+	struct {
+		bool autolock;
+		bool autoenable;
+		bool requestlock;
+		bool locked;
+		Bitu sensitivity;
+	} mouse;
+	SDL_Rect updateRects[1024];
+	Bitu num_joysticks;
+#if defined (WIN32)
+	bool using_windib;
+#endif
+	// state of alt-keys for certain special handlings
+	Bit8u laltstate;
+	Bit8u raltstate;
+};
+
+//ALERT - yet more ported shit
+//--------------------------------------------------------
+struct HINSTANCE__* gl_dll;
+int (CRTEMU_GLCALLTYPE* crtemu_wglGetProcAddress) (char const*);
+BOOL(CRTEMU_GLCALLTYPE* crtemu_wglSwapIntervalEXT) (int);
+void (CRTEMU_GLCALLTYPE* crtemu_glTexParameterfv) (CRTEMU_GLenum target, CRTEMU_GLenum pname, CRTEMU_GLfloat const* params);
+void (CRTEMU_GLCALLTYPE* crtemu_glDeleteFramebuffers) (CRTEMU_GLsizei n, CRTEMU_GLuint const* framebuffers);
+void (CRTEMU_GLCALLTYPE* crtemu_glGetIntegerv) (CRTEMU_GLenum pname, CRTEMU_GLint* data);
+void (CRTEMU_GLCALLTYPE* crtemu_glGenFramebuffers) (CRTEMU_GLsizei n, CRTEMU_GLuint* framebuffers);
+void (CRTEMU_GLCALLTYPE* crtemu_glBindFramebuffer) (CRTEMU_GLenum target, CRTEMU_GLuint framebuffer);
+void (CRTEMU_GLCALLTYPE* crtemu_glUniform1f) (CRTEMU_GLint location, CRTEMU_GLfloat v0);
+void (CRTEMU_GLCALLTYPE* crtemu_glUniform2f) (CRTEMU_GLint location, CRTEMU_GLfloat v0, CRTEMU_GLfloat v1);
+void (CRTEMU_GLCALLTYPE* crtemu_glFramebufferTexture2D) (CRTEMU_GLenum target, CRTEMU_GLenum attachment, CRTEMU_GLenum textarget, CRTEMU_GLuint texture, CRTEMU_GLint level);
+CRTEMU_GLuint(CRTEMU_GLCALLTYPE* crtemu_glCreateShader) (CRTEMU_GLenum type);
+void (CRTEMU_GLCALLTYPE* crtemu_glShaderSource) (CRTEMU_GLuint shader, CRTEMU_GLsizei count, CRTEMU_GLchar const* const* string, CRTEMU_GLint const* length);
+void (CRTEMU_GLCALLTYPE* crtemu_glCompileShader) (CRTEMU_GLuint shader);
+void (CRTEMU_GLCALLTYPE* crtemu_glGetShaderiv) (CRTEMU_GLuint shader, CRTEMU_GLenum pname, CRTEMU_GLint* params);
+CRTEMU_GLuint(CRTEMU_GLCALLTYPE* crtemu_glCreateProgram) (void);
+void (CRTEMU_GLCALLTYPE* crtemu_glAttachShader) (CRTEMU_GLuint program, CRTEMU_GLuint shader);
+void (CRTEMU_GLCALLTYPE* crtemu_glBindAttribLocation) (CRTEMU_GLuint program, CRTEMU_GLuint index, CRTEMU_GLchar const* name);
+void (CRTEMU_GLCALLTYPE* crtemu_glLinkProgram) (CRTEMU_GLuint program);
+void (CRTEMU_GLCALLTYPE* crtemu_glGetProgramiv) (CRTEMU_GLuint program, CRTEMU_GLenum pname, CRTEMU_GLint* params);
+void (CRTEMU_GLCALLTYPE* crtemu_glGenBuffers) (CRTEMU_GLsizei n, CRTEMU_GLuint* buffers);
+void (CRTEMU_GLCALLTYPE* crtemu_glBindBuffer) (CRTEMU_GLenum target, CRTEMU_GLuint buffer);
+void (CRTEMU_GLCALLTYPE* crtemu_glEnableVertexAttribArray) (CRTEMU_GLuint index);
+void (CRTEMU_GLCALLTYPE* crtemu_glVertexAttribPointer) (CRTEMU_GLuint index, CRTEMU_GLint size, CRTEMU_GLenum type, CRTEMU_GLboolean normalized, CRTEMU_GLsizei stride, void const* pointer);
+void (CRTEMU_GLCALLTYPE* crtemu_glGenTextures) (CRTEMU_GLsizei n, CRTEMU_GLuint* textures);
+void (CRTEMU_GLCALLTYPE* crtemu_glEnable) (CRTEMU_GLenum cap);
+void (CRTEMU_GLCALLTYPE* crtemu_glActiveTexture) (CRTEMU_GLenum texture);
+void (CRTEMU_GLCALLTYPE* crtemu_glBindTexture) (CRTEMU_GLenum target, CRTEMU_GLuint texture);
+void (CRTEMU_GLCALLTYPE* crtemu_glTexParameteri) (CRTEMU_GLenum target, CRTEMU_GLenum pname, CRTEMU_GLint param);
+void (CRTEMU_GLCALLTYPE* crtemu_glDeleteBuffers) (CRTEMU_GLsizei n, CRTEMU_GLuint const* buffers);
+void (CRTEMU_GLCALLTYPE* crtemu_glDeleteTextures) (CRTEMU_GLsizei n, CRTEMU_GLuint const* textures);
+void (CRTEMU_GLCALLTYPE* crtemu_glBufferData) (CRTEMU_GLenum target, CRTEMU_GLsizeiptr size, void const* data, CRTEMU_GLenum usage);
+void (CRTEMU_GLCALLTYPE* crtemu_glUseProgram) (CRTEMU_GLuint program);
+void (CRTEMU_GLCALLTYPE* crtemu_glUniform1i) (CRTEMU_GLint location, CRTEMU_GLint v0);
+void (CRTEMU_GLCALLTYPE* crtemu_glUniform3f) (CRTEMU_GLint location, CRTEMU_GLfloat v0, CRTEMU_GLfloat v1, CRTEMU_GLfloat v2);
+CRTEMU_GLint(CRTEMU_GLCALLTYPE* crtemu_glGetUniformLocation) (CRTEMU_GLuint program, CRTEMU_GLchar const* name);
+void (CRTEMU_GLCALLTYPE* crtemu_glTexImage2D) (CRTEMU_GLenum target, CRTEMU_GLint level, CRTEMU_GLint internalformat, CRTEMU_GLsizei width, CRTEMU_GLsizei height, CRTEMU_GLint border, CRTEMU_GLenum format, CRTEMU_GLenum type, void const* pixels);
+void (CRTEMU_GLCALLTYPE* crtemu_glClearColor) (CRTEMU_GLfloat red, CRTEMU_GLfloat green, CRTEMU_GLfloat blue, CRTEMU_GLfloat alpha);
+void (CRTEMU_GLCALLTYPE* crtemu_glClear) (CRTEMU_GLbitfield mask);
+void (CRTEMU_GLCALLTYPE* crtemu_glDrawArrays) (CRTEMU_GLenum mode, CRTEMU_GLint first, CRTEMU_GLsizei count);
+void (CRTEMU_GLCALLTYPE* crtemu_glViewport) (CRTEMU_GLint x, CRTEMU_GLint y, CRTEMU_GLsizei width, CRTEMU_GLsizei height);
+void (CRTEMU_GLCALLTYPE* crtemu_glDeleteShader) (CRTEMU_GLuint shader);
+void (CRTEMU_GLCALLTYPE* crtemu_glDeleteProgram) (CRTEMU_GLuint program);
+void (CRTEMU_GLCALLTYPE* crtemu_glMatrixMode) (CRTEMU_GLenum mode);
+void (CRTEMU_GLCALLTYPE* crtemu_glEnableClientState) (CRTEMU_GLenum array);
+void (CRTEMU_GLCALLTYPE* crtemu_glShadeModel) (CRTEMU_GLenum mode);
+void (CRTEMU_GLCALLTYPE* crtemu_glDisable) (CRTEMU_GLenum cap);
+void (CRTEMU_GLCALLTYPE* crtemu_glLoadIdentity) (void);
+CRTEMU_GLboolean(CRTEMU_GLCALLTYPE* crtemu_glIsList) (CRTEMU_GLuint list);
+void (CRTEMU_GLCALLTYPE* crtemu_glDeleteLists) (CRTEMU_GLuint list, CRTEMU_GLsizei range);
+CRTEMU_GLuint(CRTEMU_GLCALLTYPE* crtemu_glGenLists) (CRTEMU_GLsizei range);
+void (CRTEMU_GLCALLTYPE* crtemu_glNewList) (CRTEMU_GLuint list, CRTEMU_GLenum mode);
+void (CRTEMU_GLCALLTYPE* crtemu_glBegin) (CRTEMU_GLenum mode);
+void (CRTEMU_GLCALLTYPE* crtemu_glTexCoord2f) (CRTEMU_GLfloat s, CRTEMU_GLfloat t);
+void (CRTEMU_GLCALLTYPE* crtemu_glVertex2f) (CRTEMU_GLfloat x, CRTEMU_GLfloat y);
+void (CRTEMU_GLCALLTYPE* crtemu_glEnd) (void);
+void (CRTEMU_GLCALLTYPE* crtemu_glEndList) (void);
+void (CRTEMU_GLCALLTYPE* crtemu_glTexSubImage2D) (CRTEMU_GLenum target, CRTEMU_GLint level, CRTEMU_GLint xoffset, CRTEMU_GLint yoffset, CRTEMU_GLsizei width, CRTEMU_GLsizei height, CRTEMU_GLenum format, CRTEMU_GLenum type, const CRTEMU_GLvoid* pixels);
+void (CRTEMU_GLCALLTYPE* crtemu_glCallList) (CRTEMU_GLuint list);
+const CRTEMU_GLubyte* (CRTEMU_GLCALLTYPE* crtemu_glGetString) (CRTEMU_GLenum name);
+#ifdef CRTEMU_REPORT_SHADER_ERRORS
+void (CRTEMU_GLCALLTYPE* crtemu_glGetShaderInfoLog) (CRTEMU_GLuint shader, CRTEMU_GLsizei bufSize, CRTEMU_GLsizei* length, CRTEMU_GLchar* infoLog);
+#endif
+
+
+//-------------------------------------------------------------
+
+static SDL_Block sdl;
+
+extern const char* RunningProgram;
+extern bool CPU_CycleAutoAdjust;
+//Globals for keyboard initialisation
+bool startup_state_numlock=false;
+bool startup_state_capslock=false;
+
+const unsigned char* crt_frame_to_use;
+int framewidth;
+int frameheight;
+
+
+bool load_image(std::vector<unsigned char>& image, const std::string& filename, int& x, int& y, unsigned char*& chararr, unsigned int& chararrsize)
+{
+	int n;
+	unsigned char* data = stbi_load(filename.c_str(), &x, &y, &n, 4);
+	if (data != nullptr)
+	{
+		image = std::vector<unsigned char>(data, data + x * y * 4);
+	}
+	stbi_image_free(data);
+	if (data != nullptr)
+	{
+		int width = x;
+		int height = y;
+		chararrsize = width * height * 4;
+		const size_t RGBA = 4;
+		chararr = new unsigned char[chararrsize];
+		unsigned int counter = 0;
+
+		for (int inty = 0; inty < height; inty++) {
+			for (int intx = 0; intx < width; intx++) {
+				size_t index = RGBA * (inty * width + intx);
+				//can just add 4294967040, store in unsigned int
+				unsigned int rint = static_cast<int>(image[index + 0]);
+				unsigned int gint = static_cast<int>(image[index + 1]);
+				unsigned int bint = static_cast<int>(image[index + 2]);
+				unsigned int aint = static_cast<int>(image[index + 3]);
+				if (rint >= 128) {
+					rint = rint + 4294967040;
+				}
+				chararr[counter] = rint;
+				counter++;
+
+				if (gint >= 128) {
+					gint = gint + 4294967040;
+				}
+				chararr[counter] = gint;
+				counter++;
+
+				if (bint >= 128) {
+					bint = bint + 4294967040;
+				}
+
+				chararr[counter] = bint;
+				counter++;
+
+				if (aint >= 128) {
+					aint = aint + 4294967040;
+				}
+				chararr[counter] = aint;
+				counter++;
+			}
+		}
+	}
+	return (data != nullptr);
+}
+
+void GFX_SetTitle(Bit32s cycles,Bits frameskip,bool paused){
+	char title[200]={0};
+	static Bit32s internal_cycles=0;
+	static Bits internal_frameskip=0;
+	if(cycles != -1) internal_cycles = cycles;
+	if(frameskip != -1) internal_frameskip = frameskip;
+	if(CPU_CycleAutoAdjust) {
+		sprintf(title,"DOSBox %s, CPU speed: max %3d%% cycles, Frameskip %2d, Program: %8s",VERSION,internal_cycles,internal_frameskip,RunningProgram);
+	} else {
+		sprintf(title,"DOSBox %s, CPU speed: %8d cycles, Frameskip %2d, Program: %8s",VERSION,internal_cycles,internal_frameskip,RunningProgram);
+	}
+
+	if(paused) strcat(title," PAUSED");
+	SDL_WM_SetCaption(title,VERSION);
+}
+
+static unsigned char logo[32*32*4]= {
+#include "dosbox_logo.h"
+};
+static void GFX_SetIcon() {
+#if !defined(MACOSX)
+	/* Set Icon (must be done before any sdl_setvideomode call) */
+	/* But don't set it on OS X, as we use a nicer external icon there. */
+	/* Made into a separate call, so it can be called again when we restart the graphics output on win32 */
+#if WORDS_BIGENDIAN
+	SDL_Surface* logos= SDL_CreateRGBSurfaceFrom((void*)logo,32,32,32,128,0xff000000,0x00ff0000,0x0000ff00,0);
+#else
+	SDL_Surface* logos= SDL_CreateRGBSurfaceFrom((void*)logo,32,32,32,128,0x000000ff,0x0000ff00,0x00ff0000,0);
+#endif
+	SDL_WM_SetIcon(logos,NULL);
+#endif
+}
+
+
+static void KillSwitch(bool pressed) {
+	if (!pressed)
+		return;
+	throw 1;
+}
+
+static void PauseDOSBox(bool pressed) {
+	if (!pressed)
+		return;
+	GFX_SetTitle(-1,-1,true);
+	bool paused = true;
+	KEYBOARD_ClrBuffer();
+	SDL_Delay(500);
+	SDL_Event event;
+	while (SDL_PollEvent(&event)) {
+		// flush event queue.
+	}
+
+	while (paused) {
+		SDL_WaitEvent(&event);    // since we're not polling, cpu usage drops to 0.
+		switch (event.type) {
+
+			case SDL_QUIT: throw(0); break; /*KillSwitch(true); break; */
+			case SDL_KEYDOWN:   // Must use Pause/Break Key to resume.
+			case SDL_KEYUP:
+			if(event.key.keysym.sym == SDLK_PAUSE) {
+
+				paused = false;
+				GFX_SetTitle(-1,-1,false);
+				break;
+			}
+#if defined (MACOSX)
+			if (event.key.keysym.sym == SDLK_q && (event.key.keysym.mod == KMOD_RMETA || event.key.keysym.mod == KMOD_LMETA) ) {
+				/* On macs, all aps exit when pressing cmd-q */
+				KillSwitch(true);
+				break;
+			} 
+#endif
+		}
+	}
+}
+
+#if defined (WIN32)
+bool GFX_SDLUsingWinDIB(void) {
+	return sdl.using_windib;
+}
+#endif
+
+/* Reset the screen with current values in the sdl structure */
+Bitu GFX_GetBestMode(Bitu flags) {
+	Bitu testbpp,gotbpp;
+	switch (sdl.desktop.want_type) {
+	case SCREEN_SURFACE:
+check_surface:
+		flags &= ~GFX_LOVE_8;		//Disable love for 8bpp modes
+		/* Check if we can satisfy the depth it loves */
+		if (flags & GFX_LOVE_8) testbpp=8;
+		else if (flags & GFX_LOVE_15) testbpp=15;
+		else if (flags & GFX_LOVE_16) testbpp=16;
+		else if (flags & GFX_LOVE_32) testbpp=32;
+		else testbpp=0;
+#if (HAVE_DDRAW_H) && defined(WIN32)
+check_gotbpp:
+#endif
+		if (sdl.desktop.fullscreen) gotbpp=SDL_VideoModeOK(640,480,testbpp,SDL_FULLSCREEN|SDL_HWSURFACE|SDL_HWPALETTE);
+		else gotbpp=sdl.desktop.bpp;
+		/* If we can't get our favorite mode check for another working one */
+		switch (gotbpp) {
+		case 8:
+			if (flags & GFX_CAN_8) flags&=~(GFX_CAN_15|GFX_CAN_16|GFX_CAN_32);
+			break;
+		case 15:
+			if (flags & GFX_CAN_15) flags&=~(GFX_CAN_8|GFX_CAN_16|GFX_CAN_32);
+			break;
+		case 16:
+			if (flags & GFX_CAN_16) flags&=~(GFX_CAN_8|GFX_CAN_15|GFX_CAN_32);
+			break;
+		case 24:
+		case 32:
+			if (flags & GFX_CAN_32) flags&=~(GFX_CAN_8|GFX_CAN_15|GFX_CAN_16);
+			break;
+		}
+		flags |= GFX_CAN_RANDOM;
+		break;
+#if (HAVE_DDRAW_H) && defined(WIN32)
+	case SCREEN_SURFACE_DDRAW:
+		if (!(flags&(GFX_CAN_15|GFX_CAN_16|GFX_CAN_32))) goto check_surface;
+		if (flags & GFX_LOVE_15) testbpp=15;
+		else if (flags & GFX_LOVE_16) testbpp=16;
+		else if (flags & GFX_LOVE_32) testbpp=32;
+		else testbpp=0;
+		flags|=GFX_SCALING;
+		goto check_gotbpp;
+#endif
+	case SCREEN_OVERLAY:
+		if (flags & GFX_RGBONLY || !(flags&GFX_CAN_32)) goto check_surface;
+		flags|=GFX_SCALING;
+		flags&=~(GFX_CAN_8|GFX_CAN_15|GFX_CAN_16);
+		break;
+#if C_OPENGL
+	case SCREEN_OPENGL:
+		if (flags & GFX_RGBONLY || !(flags&GFX_CAN_32)) goto check_surface;
+		flags|=GFX_SCALING;
+		flags&=~(GFX_CAN_8|GFX_CAN_15|GFX_CAN_16);
+		break;
+#endif
+	default:
+		goto check_surface;
+		break;
+	}
+	return flags;
+}
+
+
+void GFX_ResetScreen(void) {
+
+	GFX_Stop();
+	if (sdl.draw.callback)
+		(sdl.draw.callback)( GFX_CallBackReset );
+	GFX_Start();
+	CPU_Reset_AutoAdjust();
+}
+
+void GFX_ForceFullscreenExit(void) {
+	if (sdl.desktop.lazy_fullscreen) {
+//		sdl.desktop.lazy_fullscreen_req=true;
+		LOG_MSG("GFX LF: invalid screen change");
+	} else {
+		sdl.desktop.fullscreen=false;
+		GFX_ResetScreen();
+	}
+}
+
+static int int_log2 (int val) {
+    int log = 0;
+    while ((val >>= 1) != 0)
+	log++;
+    return log;
+}
+
+
+static SDL_Surface * GFX_SetupSurfaceScaled(Bit32u sdl_flags, Bit32u bpp) {
+	Bit16u fixedWidth;
+	Bit16u fixedHeight;
+
+	if (sdl.desktop.fullscreen) {
+		fixedWidth = sdl.desktop.full.fixed ? sdl.desktop.full.width : 0;
+		fixedHeight = sdl.desktop.full.fixed ? sdl.desktop.full.height : 0;
+		sdl_flags |= SDL_FULLSCREEN|SDL_HWSURFACE;
+	} else {
+        RECT rect;
+        GetWindowRect( GetDesktopWindow(), &rect );
+	    sdl.desktop.window.width  = rect.right - rect.left;
+	    sdl.desktop.window.height = rect.bottom - rect.top;
+		//ALERT - THIS IS PROBABLY WHERE THE VIEWPORT IS SHRANK, edit: no dice
+        sdl.desktop.window.width -= sdl.desktop.window.width / 10;
+        sdl.desktop.window.height -= sdl.desktop.window.height / 10;
+		fixedWidth = sdl.desktop.window.width;
+		fixedHeight = sdl.desktop.window.height;
+		sdl_flags |= SDL_HWSURFACE;
+	}
+	if (fixedWidth && fixedHeight) {
+		double ratio_w=(double)fixedWidth/(sdl.draw.width*sdl.draw.scalex);
+		double ratio_h=(double)fixedHeight/(sdl.draw.height*sdl.draw.scaley);
+		if ( ratio_w < ratio_h) {
+			sdl.clip.w=fixedWidth;
+			sdl.clip.h=(Bit16u)(sdl.draw.height*sdl.draw.scaley*ratio_w);
+		} else {
+			sdl.clip.w=(Bit16u)(sdl.draw.width*sdl.draw.scalex*ratio_h);
+			sdl.clip.h=(Bit16u)fixedHeight;
+		}
+		if (sdl.desktop.fullscreen)
+			sdl.surface = SDL_SetVideoMode(fixedWidth,fixedHeight,bpp,sdl_flags);
+		else
+			sdl.surface = SDL_SetVideoMode(fixedWidth,fixedHeight,bpp,sdl_flags);
+		if (sdl.surface && sdl.surface->flags & SDL_FULLSCREEN) {
+			sdl.clip.x=(Sint16)((sdl.surface->w-sdl.clip.w)/2);
+			sdl.clip.y=(Sint16)((sdl.surface->h-sdl.clip.h)/2);
+		} else {
+			sdl.clip.x = 0;
+			sdl.clip.y = 0;
+		}
+		return sdl.surface;
+	} else {
+		sdl.clip.x=0;sdl.clip.y=0;
+		sdl.clip.w=(Bit16u)(sdl.draw.width*sdl.draw.scalex);
+		sdl.clip.h=(Bit16u)(sdl.draw.height*sdl.draw.scaley);
+		sdl.surface=SDL_SetVideoMode(sdl.clip.w,sdl.clip.h,bpp,sdl_flags);
+		return sdl.surface;
+	}
+}
+
+void GFX_TearDown(void) {
+	if (sdl.updating)
+		GFX_EndUpdate( 0 );
+
+	if (sdl.blit.surface) {
+		SDL_FreeSurface(sdl.blit.surface);
+		sdl.blit.surface=0;
+	}
+}
+
+Bitu GFX_SetSize(Bitu width,Bitu height,Bitu flags,double scalex,double scaley,GFX_CallBack_t callback) {
+	if (sdl.updating)
+		GFX_EndUpdate( 0 );
+	//ALERT - TESTING
+	//width = width / 2;
+	
+	RECT rect;
+	GetClientRect(GetDesktopWindow(), &rect);
+	int clientheight = rect.bottom - rect.top;
+	int clientwidth = rect.right - rect.left;
+
+	int newwidth = (int)((float)clientheight * (4.0f / 3.0f));
+	int hborder = (int)((float)(abs(clientwidth - newwidth)) / 2.0f);
+
+	//int newnewwidth = (int)((float)clientheight * (4.0f / 3.0f));
+
+
+	sdl.draw.width=width;
+
+	sdl.draw.height=height;
+//	sdl.draw.width = clientwidth;
+//	sdl.draw.height = clientheight;
+
+	sdl.draw.callback=callback;
+	sdl.draw.scalex=scalex;
+	sdl.draw.scaley=scaley;
+
+	Bitu bpp=0;
+	Bitu retFlags = 0;
+
+	if (sdl.blit.surface) {
+		SDL_FreeSurface(sdl.blit.surface);
+		sdl.blit.surface=0;
+	}
+	switch (sdl.desktop.want_type) {
+	case SCREEN_SURFACE:
+dosurface:
+		if (flags & GFX_CAN_8) bpp=8;
+		if (flags & GFX_CAN_15) bpp=15;
+		if (flags & GFX_CAN_16) bpp=16;
+		if (flags & GFX_CAN_32) bpp=32;
+		sdl.desktop.type=SCREEN_SURFACE;
+		sdl.clip.w=width;
+		sdl.clip.h=height;
+		if (sdl.desktop.fullscreen) {
+			if (sdl.desktop.full.fixed) {
+				sdl.clip.x=(Sint16)((sdl.desktop.full.width-width)/2);
+				sdl.clip.y=(Sint16)((sdl.desktop.full.height-height)/2);
+				sdl.surface=SDL_SetVideoMode(sdl.desktop.full.width,sdl.desktop.full.height,bpp,
+					SDL_FULLSCREEN | ((flags & GFX_CAN_RANDOM) ? SDL_SWSURFACE : SDL_HWSURFACE) |
+					(sdl.desktop.doublebuf ? SDL_DOUBLEBUF|SDL_ASYNCBLIT : 0) | SDL_HWPALETTE);
+				if (sdl.surface == NULL) E_Exit("Could not set fullscreen video mode %ix%i-%i: %s",sdl.desktop.full.width,sdl.desktop.full.height,bpp,SDL_GetError());
+			} else {
+				sdl.clip.x=0;sdl.clip.y=0;
+				sdl.surface=SDL_SetVideoMode(width,height,bpp,
+					SDL_FULLSCREEN | ((flags & GFX_CAN_RANDOM) ? SDL_SWSURFACE : SDL_HWSURFACE) |
+					(sdl.desktop.doublebuf ? SDL_DOUBLEBUF|SDL_ASYNCBLIT  : 0)|SDL_HWPALETTE);
+				if (sdl.surface == NULL)
+					E_Exit("Could not set fullscreen video mode %ix%i-%i: %s",width,height,bpp,SDL_GetError());
+			}
+		} else {
+			sdl.clip.x=0;sdl.clip.y=0;
+			sdl.surface=SDL_SetVideoMode(width,height,bpp,(flags & GFX_CAN_RANDOM) ? SDL_SWSURFACE : SDL_HWSURFACE);
+#ifdef WIN32
+			if (sdl.surface == NULL) {
+				SDL_QuitSubSystem(SDL_INIT_VIDEO);
+				if (!sdl.using_windib) {
+					LOG_MSG("Failed to create hardware surface.\nRestarting video subsystem with windib enabled.");
+					putenv("SDL_VIDEODRIVER=windib");
+					sdl.using_windib=true;
+				} else {
+					LOG_MSG("Failed to create hardware surface.\nRestarting video subsystem with directx enabled.");
+					putenv("SDL_VIDEODRIVER=directx");
+					sdl.using_windib=false;
+				}
+				SDL_InitSubSystem(SDL_INIT_VIDEO);
+				GFX_SetIcon(); //Set Icon again
+				sdl.surface = SDL_SetVideoMode(width,height,bpp,SDL_HWSURFACE);
+				if(sdl.surface) GFX_SetTitle(-1,-1,false); //refresh title.
+			}
+#endif
+			if (sdl.surface == NULL)
+				E_Exit("Could not set windowed video mode %ix%i-%i: %s",width,height,bpp,SDL_GetError());
+		}
+		if (sdl.surface) {
+			switch (sdl.surface->format->BitsPerPixel) {
+			case 8:
+				retFlags = GFX_CAN_8;
+                break;
+			case 15:
+				retFlags = GFX_CAN_15;
+				break;
+			case 16:
+				retFlags = GFX_CAN_16;
+                break;
+			case 32:
+				retFlags = GFX_CAN_32;
+                break;
+			}
+			if (retFlags && (sdl.surface->flags & SDL_HWSURFACE))
+				retFlags |= GFX_HARDWARE;
+			if (retFlags && (sdl.surface->flags & SDL_DOUBLEBUF)) {
+				sdl.blit.surface=SDL_CreateRGBSurface(SDL_HWSURFACE,
+					sdl.draw.width, sdl.draw.height,
+					sdl.surface->format->BitsPerPixel,
+					sdl.surface->format->Rmask,
+					sdl.surface->format->Gmask,
+					sdl.surface->format->Bmask,
+				0);
+				/* If this one fails be ready for some flickering... */
+			}
+		}
+		break;
+#if (HAVE_DDRAW_H) && defined(WIN32)
+	case SCREEN_SURFACE_DDRAW:
+		if (flags & GFX_CAN_15) bpp=15;
+		if (flags & GFX_CAN_16) bpp=16;
+		if (flags & GFX_CAN_32) bpp=32;
+		if (!GFX_SetupSurfaceScaled((sdl.desktop.doublebuf && sdl.desktop.fullscreen) ? SDL_DOUBLEBUF : 0,bpp)) goto dosurface;
+		sdl.blit.rect.top=sdl.clip.y;
+		sdl.blit.rect.left=sdl.clip.x;
+		sdl.blit.rect.right=sdl.clip.x+sdl.clip.w;
+		sdl.blit.rect.bottom=sdl.clip.y+sdl.clip.h;
+		sdl.blit.surface=SDL_CreateRGBSurface(SDL_HWSURFACE,sdl.draw.width,sdl.draw.height,
+				sdl.surface->format->BitsPerPixel,
+				sdl.surface->format->Rmask,
+				sdl.surface->format->Gmask,
+				sdl.surface->format->Bmask,
+				0);
+		if (!sdl.blit.surface || (!sdl.blit.surface->flags&SDL_HWSURFACE)) {
+			if (sdl.blit.surface) {
+				SDL_FreeSurface(sdl.blit.surface);
+				sdl.blit.surface=0;
+			}
+			LOG_MSG("Failed to create ddraw surface, back to normal surface.");
+			goto dosurface;
+		}
+		switch (sdl.surface->format->BitsPerPixel) {
+		case 15:
+			retFlags = GFX_CAN_15 | GFX_SCALING | GFX_HARDWARE;
+			break;
+		case 16:
+			retFlags = GFX_CAN_16 | GFX_SCALING | GFX_HARDWARE;
+               break;
+		case 32:
+			retFlags = GFX_CAN_32 | GFX_SCALING | GFX_HARDWARE;
+               break;
+		}
+		sdl.desktop.type=SCREEN_SURFACE_DDRAW;
+		break;
+#endif
+	case SCREEN_OVERLAY:
+		if (sdl.overlay) {
+			SDL_FreeYUVOverlay(sdl.overlay);
+			sdl.overlay=0;
+		}
+		if (!(flags&GFX_CAN_32) || (flags & GFX_RGBONLY)) goto dosurface;
+		if (!GFX_SetupSurfaceScaled(0,0)) goto dosurface;
+		sdl.overlay=SDL_CreateYUVOverlay(width*2,height,SDL_UYVY_OVERLAY,sdl.surface);
+		if (!sdl.overlay) {
+			LOG_MSG("SDL:Failed to create overlay, switching back to surface");
+			goto dosurface;
+		}
+		sdl.desktop.type=SCREEN_OVERLAY;
+		retFlags = GFX_CAN_32 | GFX_SCALING | GFX_HARDWARE;
+		break;
+#if C_OPENGL
+	case SCREEN_OPENGL:
+	{
+		if (sdl.opengl.framebuf) {
+#if defined(NVIDIA_PixelDataRange)
+			if (sdl.opengl.pixel_data_range) db_glFreeMemoryNV(sdl.opengl.framebuf);
+			else
+#endif
+			free(sdl.opengl.framebuf);
+		}
+		sdl.opengl.framebuf=0;
+		if (!(flags&GFX_CAN_32) || (flags & GFX_RGBONLY)) goto dosurface;
+
+		//ALERT - quick sanity test
+		Bitu valuetouse;
+		if (width > height) {
+			valuetouse = width;
+			std::cout << "valuetouse width: " << valuetouse << " ";
+		}
+		else {
+			valuetouse = height;
+			std::cout << "valuetouse height: " << valuetouse << " ";
+		}
+
+		
+
+		//valuetouse = valuetouse / 2;
+
+		//int texsize=2 << int_log2(width > height ? width : height);
+		int texsize = 2 << int_log2(valuetouse);
+		if (texsize>sdl.opengl.max_texsize) {
+			LOG_MSG("SDL:OPENGL:No support for texturesize of %d, falling back to surface",texsize);
+			goto dosurface;
+		}
+		SDL_GL_SetAttribute( SDL_GL_DOUBLEBUFFER, 1 );
+#if defined (WIN32) && SDL_VERSION_ATLEAST(1, 2, 11)
+		SDL_GL_SetAttribute( SDL_GL_SWAP_CONTROL, 0 );
+#endif
+		GFX_SetupSurfaceScaled(SDL_OPENGL,0);
+		if (!sdl.surface || sdl.surface->format->BitsPerPixel<15) {
+			LOG_MSG("SDL:OPENGL:Can't open drawing surface, are you running in 16bpp(or higher) mode?");
+			goto dosurface;
+		}
+		/* Create the texture and display list */
+#if defined(NVIDIA_PixelDataRange)
+		if (sdl.opengl.pixel_data_range) {
+			sdl.opengl.framebuf=db_glAllocateMemoryNV(width*height*4,0.0,1.0,1.0);
+			crtemu_glPixelDataRangeNV(CRTEMU_GL_WRITE_PIXEL_DATA_RANGE_NV,width*height*4,sdl.opengl.framebuf);
+			crtemu_glEnableClientState(CRTEMU_GL_WRITE_PIXEL_DATA_RANGE_NV);
+			//glEnableClientState(GL_WRITE_PIXEL_DATA_RANGE_NV);
+		} else {
+#else
+		{
+#endif
+			sdl.opengl.framebuf=malloc(width*height*4);		//32 bit color
+		}
+		sdl.opengl.pitch=width*4;
+		//ALERT - TESTING
+		//crtemu_glViewport(sdl.clip.x,sdl.clip.y,sdl.clip.w,sdl.clip.h);
+		//ALERT - frame?
+		//------------------------------------
+		/*crtemu_glDeleteTextures(1, &sdl.opengl.texture2);
+		crtemu_glGenTextures(1, &sdl.opengl.texture2);
+		crtemu_glActiveTexture(CRTEMU_GL_TEXTURE3);
+		crtemu_glBindTexture(CRTEMU_GL_TEXTURE_2D, sdl.opengl.texture2);*/
+		//crtemu_glTexImage2D(CRTEMU_GL_TEXTURE_2D, 0, CRTEMU_GL_RGBA, framewidth, frameheight, 0, CRTEMU_GL_RGBA, CRTEMU_GL_UNSIGNED_BYTE, crt_frame_to_use);
+		//------------------------------------
+
+		float color[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+/*
+		crtemu_glMatrixMode(CRTEMU_GL_PROJECTION);
+		crtemu_glDeleteTextures(1, &sdl.opengl.texture2);
+		crtemu_glGenTextures(1, &sdl.opengl.texture2);
+		crtemu_glEnable(CRTEMU_GL_TEXTURE_2D);
+		//crtemu_glActiveTexture(CRTEMU_GL_TEXTURE3);
+		crtemu_glBindTexture(CRTEMU_GL_TEXTURE_2D, sdl.opengl.texture2);
+		crtemu_glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MIN_FILTER, CRTEMU_GL_LINEAR);
+		crtemu_glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MAG_FILTER, CRTEMU_GL_LINEAR);
+		crtemu_glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_WRAP_S, CRTEMU_GL_CLAMP_TO_BORDER);
+		crtemu_glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_WRAP_T, CRTEMU_GL_CLAMP_TO_BORDER);
+		crtemu_glTexParameterfv(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_BORDER_COLOR, color);
+
+		crtemu_glTexImage2D(CRTEMU_GL_TEXTURE_2D, 0, CRTEMU_GL_RGBA, framewidth, frameheight, 0, CRTEMU_GL_RGBA, CRTEMU_GL_UNSIGNED_BYTE, crt_frame_to_use);
+*/
+
+		//crtemu_glViewport(sdl.clip.x, sdl.clip.y, clientwidth, clientheight);
+		crtemu_glViewport(hborder, 0, newwidth, height);
+
+
+
+
+		crtemu_glMatrixMode (CRTEMU_GL_PROJECTION);
+		//glMatrixMode(GL_PROJECTION);
+		crtemu_glDeleteTextures(1,&sdl.opengl.texture);
+		crtemu_glGenTextures(1,&sdl.opengl.texture);
+		crtemu_glEnable(CRTEMU_GL_TEXTURE_2D);
+	//	crtemu_glActiveTexture(CRTEMU_GL_TEXTURE2);
+		crtemu_glBindTexture(CRTEMU_GL_TEXTURE_2D,sdl.opengl.texture);
+		// No borders
+		crtemu_glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_WRAP_S, CRTEMU_GL_CLAMP);
+		crtemu_glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_WRAP_T, CRTEMU_GL_CLAMP);
+		if (sdl.opengl.bilinear) {
+			crtemu_glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MAG_FILTER, CRTEMU_GL_LINEAR);
+			crtemu_glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MIN_FILTER, CRTEMU_GL_LINEAR);
+		} else {
+			crtemu_glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MAG_FILTER, CRTEMU_GL_NEAREST);
+			crtemu_glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MIN_FILTER, CRTEMU_GL_NEAREST);
+		}
+		//ALERT - TESTING
+	//	crtemu_glTexImage2D(CRTEMU_GL_TEXTURE_2D, 0, CRTEMU_GL_RGBA8, texsize, texsize, 0, CRTEMU_GL_BGRA_EXT, CRTEMU_GL_UNSIGNED_BYTE, 0);
+		crtemu_glTexImage2D(CRTEMU_GL_TEXTURE_2D, 0, CRTEMU_GL_RGBA, framewidth, frameheight, 0, CRTEMU_GL_RGBA, CRTEMU_GL_UNSIGNED_BYTE, crt_frame_to_use);
+
+		//crtemu->glActiveTexture(CRTEMU_GL_TEXTURE3);
+		//crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->frametexture);
+		//crtemu->glTexImage2D(CRTEMU_GL_TEXTURE_2D, 0, CRTEMU_GL_RGBA, frame_width, frame_height, 0, CRTEMU_GL_RGBA, CRTEMU_GL_UNSIGNED_BYTE, frame_abgr);
+
+	//	crtemu_glViewport(sdl.clip.x, sdl.clip.y, clientwidth, clientheight);
+
+
+		//glClearColor (0.0, 0.0, 0.0, 1.0);
+		//glClear(GL_COLOR_BUFFER_BIT);
+		//SDL_GL_SwapBuffers();
+		//glClear(GL_COLOR_BUFFER_BIT);
+		crtemu_glShadeModel (CRTEMU_GL_FLAT);
+		//glShadeModel(GL_FLAT);
+		crtemu_glDisable (CRTEMU_GL_DEPTH_TEST);
+		//glDisable(CRTEMU_GL_DEPTH_TEST);
+		crtemu_glDisable (CRTEMU_GL_LIGHTING);
+		crtemu_glDisable(CRTEMU_GL_CULL_FACE);
+		crtemu_glEnable(CRTEMU_GL_TEXTURE_2D);
+		crtemu_glMatrixMode (CRTEMU_GL_MODELVIEW);
+		crtemu_glLoadIdentity ();
+		//glLoadIdentity();
+		//ALERT - TESTING
+		//ALERT - multiply, not divide, width or height to change output
+		//int newwidth = (int)((float)clientheight * (4.0f / 3.0f));
+		/*Bitu newwidthtex = ((float)height * (4.0f / 3.0f));
+		float hbordertex = (float)((float)(abs(width - (float)newwidthtex)) / 2.0f);*/
+
+
+
+		float hbordertex = (float)((float)(abs(width - (float)(width * (16.0f / 9.0f)))) / 2.0f);
+
+		std::cout << "height: " << height << " width: " << width << " ";
+		GLfloat tex_width=((GLfloat)(width*(10.0f/9.0f))/(GLfloat)texsize);
+
+		//GLfloat tex_width = ((GLfloat)(width) / (GLfloat)texsize);
+
+		//GLfloat tex_width = ((GLfloat)(newwidthtex) / (GLfloat)texsize);
+
+		GLfloat tex_height=((GLfloat)(height)/(GLfloat)texsize);
+
+		std::cout << "tex_height: " << tex_height << " tex_width: " << tex_width << " ";
+
+
+
+		if (crtemu_glIsList(sdl.opengl.displaylist)) crtemu_glDeleteLists(sdl.opengl.displaylist, 1);
+		//glIsList(sdl.opengl.displaylist);
+		//glDeleteLists(sdl.opengl.displaylist, 1);
+		//ALERT - will this work? fuck me if it doesnt
+		sdl.opengl.displaylist = crtemu_glGenLists(1);
+		//glGenLists(1);
+		crtemu_glNewList(sdl.opengl.displaylist, CRTEMU_GL_COMPILE);
+		crtemu_glBindTexture(CRTEMU_GL_TEXTURE_2D, sdl.opengl.texture);
+		crtemu_glBegin(CRTEMU_GL_QUADS);
+		// lower left
+//		crtemu_glTexCoord2f(0,tex_height); crtemu_glVertex2f(-1.0f,-1.0f);
+		crtemu_glTexCoord2f(0, tex_height); crtemu_glVertex2f(-1.0f, -1.0f);
+		//glTexCoord2f(0, tex_height);
+		// lower right
+		crtemu_glTexCoord2f(tex_width,tex_height); crtemu_glVertex2f(1.0f, -1.0f);
+		// upper right
+		crtemu_glTexCoord2f(tex_width,0); crtemu_glVertex2f(1.0f, 1.0f);
+		// upper left
+//		crtemu_glTexCoord2f(0,0); crtemu_glVertex2f(-1.0f, 1.0f);
+		crtemu_glTexCoord2f(0, 0); crtemu_glVertex2f(-1.0f, 1.0f);
+		//ALERT - TESTING
+		//crtemu_glViewport(sdl.clip.x, sdl.clip.y, sdl.clip.w, sdl.clip.h);
+		crtemu_glEnd();
+		crtemu_glEndList();
+		sdl.desktop.type=SCREEN_OPENGL;
+		retFlags = GFX_CAN_32 | GFX_SCALING;
+#if defined(NVIDIA_PixelDataRange)
+		if (sdl.opengl.pixel_data_range)
+			retFlags |= GFX_HARDWARE;
+#endif
+	break;
+		}//OPENGL
+#endif	//C_OPENGL
+	default:
+		goto dosurface;
+		break;
+	}//CASE
+	if (retFlags)
+		GFX_Start();
+	if (!sdl.mouse.autoenable) SDL_ShowCursor(sdl.mouse.autolock?SDL_DISABLE:SDL_ENABLE);
+	return retFlags;
+}
+
+void GFX_CaptureMouse(void) {
+	sdl.mouse.locked=!sdl.mouse.locked;
+	if (sdl.mouse.locked) {
+		SDL_WM_GrabInput(SDL_GRAB_ON);
+		SDL_ShowCursor(SDL_DISABLE);
+	} else {
+		SDL_WM_GrabInput(SDL_GRAB_OFF);
+		if (sdl.mouse.autoenable || !sdl.mouse.autolock) SDL_ShowCursor(SDL_ENABLE);
+	}
+        mouselocked=sdl.mouse.locked;
+}
+
+void GFX_UpdateSDLCaptureState(void) {
+	if (sdl.mouse.locked) {
+		SDL_WM_GrabInput(SDL_GRAB_ON);
+		SDL_ShowCursor(SDL_DISABLE);
+	} else {
+		SDL_WM_GrabInput(SDL_GRAB_OFF);
+		if (sdl.mouse.autoenable || !sdl.mouse.autolock) SDL_ShowCursor(SDL_ENABLE);
+	}
+	CPU_Reset_AutoAdjust();
+	GFX_SetTitle(-1,-1,false);
+}
+
+bool mouselocked; //Global variable for mapper
+static void CaptureMouse(bool pressed) {
+	if (!pressed)
+		return;
+	GFX_CaptureMouse();
+}
+
+#if defined (WIN32)
+STICKYKEYS stick_keys = {sizeof(STICKYKEYS), 0};
+void sticky_keys(bool restore){
+	static bool inited = false;
+	if (!inited){
+		inited = true;
+		SystemParametersInfo(SPI_GETSTICKYKEYS, sizeof(STICKYKEYS), &stick_keys, 0);
+	} 
+	if (restore) {
+		SystemParametersInfo(SPI_SETSTICKYKEYS, sizeof(STICKYKEYS), &stick_keys, 0);
+		return;
+	}
+	//Get current sticky keys layout:
+	STICKYKEYS s = {sizeof(STICKYKEYS), 0};
+	SystemParametersInfo(SPI_GETSTICKYKEYS, sizeof(STICKYKEYS), &s, 0);
+	if ( !(s.dwFlags & SKF_STICKYKEYSON)) { //Not on already
+		s.dwFlags &= ~SKF_HOTKEYACTIVE;
+		SystemParametersInfo(SPI_SETSTICKYKEYS, sizeof(STICKYKEYS), &s, 0);
+	}
+}
+#endif
+
+void GFX_SwitchFullScreen(void) {
+	sdl.desktop.fullscreen=!sdl.desktop.fullscreen;
+	if (sdl.desktop.fullscreen) {
+		if (!sdl.mouse.locked) GFX_CaptureMouse();
+#if defined (WIN32)
+		sticky_keys(false); //disable sticky keys in fullscreen mode
+#endif
+	} else {
+		if (sdl.mouse.locked) GFX_CaptureMouse();
+#if defined (WIN32)		
+		sticky_keys(true); //restore sticky keys to default state in windowed mode.
+#endif
+	}
+	GFX_ResetScreen();
+}
+
+static void SwitchFullScreen(bool pressed) {
+	if (!pressed)
+		return;
+
+	if (sdl.desktop.lazy_fullscreen) {
+//		sdl.desktop.lazy_fullscreen_req=true;
+		LOG_MSG("GFX LF: fullscreen switching not supported");
+	} else {
+		GFX_SwitchFullScreen();
+	}
+}
+
+void GFX_SwitchLazyFullscreen(bool lazy) {
+	sdl.desktop.lazy_fullscreen=lazy;
+	sdl.desktop.lazy_fullscreen_req=false;
+}
+
+void GFX_SwitchFullscreenNoReset(void) {
+	sdl.desktop.fullscreen=!sdl.desktop.fullscreen;
+}
+
+bool GFX_LazyFullscreenRequested(void) {
+	if (sdl.desktop.lazy_fullscreen) return sdl.desktop.lazy_fullscreen_req;
+	return false;
+}
+
+void GFX_RestoreMode(void) {
+	GFX_SetSize(sdl.draw.width,sdl.draw.height,sdl.draw.flags,sdl.draw.scalex,sdl.draw.scaley,sdl.draw.callback);
+	GFX_UpdateSDLCaptureState();
+}
+
+
+struct crt_context_t {
+    HDC hdc;
+    HGLRC gl_context;
+    SDL_mutex* mutex;
+    bool running;
+	Bit8u *pixels;
+	size_t capacity;
+	int width;
+	int height;
+} crt_context = { 0 };
+
+struct SDL_Thread* crt_thread_ptr;
+
+int crt_thread( void* user_data) {
+
+	
+
+    crt_context_t* context = (crt_context_t*) user_data;
+
+	//context->capacity = 1824 * 1026; /*1024 * 1024;*/
+	context->capacity = framewidth * frameheight;
+	context->pixels = (Bit8u*) malloc( context->capacity * 4 );
+	context->width = 0;
+	context->height = 0;
+
+	HGLRC otherctx = context->gl_context;
+
+	HGLRC glctx = wglCreateContext( context->hdc );
+	wglMakeCurrent( context->hdc, glctx );
+
+
+
+	crtemu = crtemu_create( 0 );
+	if( crtemu ) crtemu_frame( crtemu, (CRTEMU_U32*) crt_frame_to_use, framewidth, frameheight /*1024, 1024*/);
+
+    UINT64 clock_freq;
+	UINT64 prev_clock = 0;
+    int frame_rate_lock = 70;
+    //HANDLE waitable_timer;
+
+	int present_width = 0;
+	int present_height = 0;
+
+	LARGE_INTEGER f;
+	QueryPerformanceFrequency( &f );
+    //clock_freq = (UINT64) f.QuadPart;
+
+	//waitable_timer = CreateWaitableTimer(NULL, TRUE, NULL);
+
+    while( context->running ) {
+	    /*UINT64 curr_clock = 0ULL;
+		LARGE_INTEGER c;
+		QueryPerformanceCounter( &c );
+		curr_clock = (UINT64) c.QuadPart;
+
+        UINT64 delta = 0ULL;
+		if( curr_clock > prev_clock )
+			delta = curr_clock - prev_clock - 1ULL;
+		if( delta < clock_freq / frame_rate_lock ) {
+			UINT64 wait = ( clock_freq / frame_rate_lock ) - delta;
+			if( wait > 0 ) {
+				LARGE_INTEGER due_time;
+				due_time.QuadPart = - (LONGLONG) ( ( 10000000ULL * wait ) / clock_freq ) ;
+
+				SetWaitableTimer( waitable_timer, &due_time, 0, 0, 0, FALSE );
+				WaitForSingleObject( waitable_timer, 200 ); // wait long enough for timer to trigger ( 200ms == 5fps )
+				CancelWaitableTimer( waitable_timer ); // in case we timed out
+				}
+			curr_clock += wait;
+		}*/
+		
+		if (wglGetCurrentContext() != glctx) continue;
+
+        int time=GetTicks();
+        SDL_LockMutex( context->mutex );	
+		if( context->gl_context != otherctx )
+			{
+			if( context->hdc != INVALID_HANDLE_VALUE && context->hdc !=  0 )
+				{
+				otherctx = context->gl_context;
+				wglMakeCurrent( NULL, NULL );
+				wglDeleteContext( glctx );
+				crtemu->glClear( CRTEMU_GL_COLOR_BUFFER_BIT );
+				crtemu_destroy( crtemu );
+				crtemu = 0;
+			again:
+				SDL_UnlockMutex( context->mutex );
+		//		Sleep( 100 );
+				SDL_LockMutex( context->mutex );		
+				glctx = wglCreateContext( context->hdc );
+				if( !glctx ) goto again;
+				wglMakeCurrent( context->hdc, glctx );
+				crtemu = crtemu_create( 0 );
+			//	crtemu_frame( crtemu, (CRTEMU_U32*) crt_frame_to_use, 1024, 1024);
+				crtemu_frame(crtemu, (CRTEMU_U32*)crt_frame_to_use, framewidth, frameheight);
+				}
+			}
+		if( context->width > 0 && context->height > 0 )
+			{
+			present_width = context->width;
+			present_height = context->height;
+
+			}
+	//	present_width = 1824;
+	//	present_height = 1026;
+		//this stuff creates the bezels and filter
+		
+		//std::cout << "input vars: " << present_width << " " << present_height << framewidth << " " << frameheight;
+		crtemu_present( crtemu, (CRTEMU_U64) time, (CRTEMU_U32 const*) context->pixels, present_width, present_height, framewidth, frameheight, 0xff000000, 0xff282828  );
+		SwapBuffers( context->hdc );
+        SDL_UnlockMutex( context->mutex );
+    }
+
+	//if( wglGetCurrentContext() == glctx ) crtemu_destroy( crtemu );
+    wglMakeCurrent( NULL, NULL );
+	wglDeleteContext( glctx );
+	crtemu = 0;
+    return 0;
+}
+
+
+
+
+bool GFX_StartUpdate(Bit8u * & pixels,Bitu & pitch) {
+	if (!sdl.active || sdl.updating)
+		return false;
+	switch (sdl.desktop.type) {
+	case SCREEN_SURFACE:
+		if (sdl.blit.surface) {
+			if (SDL_MUSTLOCK(sdl.blit.surface) && SDL_LockSurface(sdl.blit.surface))
+				return false;
+			pixels=(Bit8u *)sdl.blit.surface->pixels;
+			pitch=sdl.blit.surface->pitch;
+		} else {
+			if (SDL_MUSTLOCK(sdl.surface) && SDL_LockSurface(sdl.surface))
+				return false;
+			pixels=(Bit8u *)sdl.surface->pixels;
+			pixels+=sdl.clip.y*sdl.surface->pitch;
+			pixels+=sdl.clip.x*sdl.surface->format->BytesPerPixel;
+			pitch=sdl.surface->pitch;
+		}
+		sdl.updating=true;
+		return true;
+#if (HAVE_DDRAW_H) && defined(WIN32)
+	case SCREEN_SURFACE_DDRAW:
+		if (SDL_LockSurface(sdl.blit.surface)) {
+//			LOG_MSG("SDL Lock failed");
+			return false;
+		}
+		pixels=(Bit8u *)sdl.blit.surface->pixels;
+		pitch=sdl.blit.surface->pitch;
+		sdl.updating=true;
+		return true;
+#endif
+	case SCREEN_OVERLAY:
+		if (SDL_LockYUVOverlay(sdl.overlay)) return false;
+		pixels=(Bit8u *)*(sdl.overlay->pixels);
+		pitch=*(sdl.overlay->pitches);
+		sdl.updating=true;
+		return true;
+#if C_OPENGL
+	case SCREEN_OPENGL:
+		pixels=(Bit8u *)sdl.opengl.framebuf;
+		pitch=sdl.opengl.pitch;
+		sdl.updating=true;
+		return true;
+#endif
+	default:
+		break;
+	}
+	return false;
+}
+
+
+void GFX_EndUpdate( const Bit16u *changedLines ) {
+#if (HAVE_DDRAW_H) && defined(WIN32)
+	int ret;
+#endif
+	if (!sdl.updating)
+		return;
+	sdl.updating=false;
+	switch (sdl.desktop.type) {
+	case SCREEN_SURFACE:
+		if (SDL_MUSTLOCK(sdl.surface)) {
+			if (sdl.blit.surface) {
+				SDL_UnlockSurface(sdl.blit.surface);
+				int Blit = SDL_BlitSurface( sdl.blit.surface, 0, sdl.surface, &sdl.clip );
+				LOG(LOG_MISC,LOG_WARN)("BlitSurface returned %d",Blit);
+			} else {
+				SDL_UnlockSurface(sdl.surface);
+			}
+			SDL_Flip(sdl.surface);
+		} else if (changedLines) {
+			Bitu y = 0, index = 0, rectCount = 0;
+			while (y < sdl.draw.height) {
+				if (!(index & 1)) {
+					y += changedLines[index];
+				} else {
+					SDL_Rect *rect = &sdl.updateRects[rectCount++];
+					rect->x = sdl.clip.x;
+					rect->y = sdl.clip.y + y;
+					rect->w = (Bit16u)sdl.draw.width;
+					rect->h = changedLines[index];
+#if 0
+					if (rect->h + rect->y > sdl.surface->h) {
+						LOG_MSG("WTF %d +  %d  >%d",rect->h,rect->y,sdl.surface->h);
+					}
+#endif
+					y += changedLines[index];
+				}
+				index++;
+			}
+			if (rectCount)
+				SDL_UpdateRects( sdl.surface, rectCount, sdl.updateRects );
+		}
+		break;
+#if (HAVE_DDRAW_H) && defined(WIN32)
+	case SCREEN_SURFACE_DDRAW:
+		SDL_UnlockSurface(sdl.blit.surface);
+		ret=IDirectDrawSurface3_Blt(
+			sdl.surface->hwdata->dd_writebuf,&sdl.blit.rect,
+			sdl.blit.surface->hwdata->dd_surface,0,
+			DDBLT_WAIT, NULL);
+		switch (ret) {
+		case DD_OK:
+			break;
+		case DDERR_SURFACELOST:
+			IDirectDrawSurface3_Restore(sdl.blit.surface->hwdata->dd_surface);
+			IDirectDrawSurface3_Restore(sdl.surface->hwdata->dd_surface);
+			break;
+		default:
+			LOG_MSG("DDRAW:Failed to blit, error %X",ret);
+		}
+		SDL_Flip(sdl.surface);
+		break;
+#endif
+	case SCREEN_OVERLAY:
+		SDL_UnlockYUVOverlay(sdl.overlay);
+		SDL_DisplayYUVOverlay(sdl.overlay,&sdl.clip);
+		break;
+#if C_OPENGL
+	case SCREEN_OPENGL:
+		{
+			//ALERT - this needs to change when disabling crt
+		//glCallList(sdl.opengl.displaylist);
+        int time = GetTicks();
+		/*if (crt_context.mutex)
+			{
+			SDL_LockMutex( crt_context.mutex );		
+			if( crt_context.capacity < ( sdl.opengl.pitch / 4 ) * sdl.draw.height * sizeof( uint32_t ) )
+				{
+				crt_context.capacity = ( sdl.opengl.pitch / 4 ) * sdl.draw.height * sizeof( uint32_t ) * 2;
+				crt_context.pixels = (Bit8u *)realloc( crt_context.pixels, crt_context.capacity );
+				}
+			memcpy( crt_context.pixels, sdl.opengl.framebuf, ( sdl.opengl.pitch / 4 ) * sdl.draw.height * sizeof( uint32_t ) );
+			crt_context.width = sdl.opengl.pitch / 4;
+			crt_context.height = sdl.draw.height;
+			crt_context.gl_context = wglGetCurrentContext();
+			crt_context.hdc = wglGetCurrentDC();
+			SDL_UnlockMutex( crt_context.mutex );
+
+			}*/
+		
+	/*	if (crtemu && pixels)
+			crtemu_present( crtemu, (CRTEMU_U64) time, (CRTEMU_U32 const*) pixels, sdl.opengl.pitch / 4, sdl.draw.height, 0xffffffff, 0xff000000 );
+		SDL_GL_SwapBuffers();*/
+
+#if defined(NVIDIA_PixelDataRange)
+		if (sdl.opengl.pixel_data_range) {
+			crtemu_glBindTexture(CRTEMU_GL_TEXTURE_2D, sdl.opengl.texture);
+			//ALERT - define GL_UNSIGNED_INT_8_8_8_8_REV?
+			crtemu_glTexSubImage2D(CRTEMU_GL_TEXTURE_2D, 0, 0, 0,
+					sdl.draw.width, sdl.draw.height, CRTEMU_GL_BGRA_EXT, GL_UNSIGNED_INT_8_8_8_8_REV, sdl.opengl.framebuf);
+			crtemu_glCallList(sdl.opengl.displaylist);
+			SDL_GL_SwapBuffers();
+		} else
+#endif
+		if (changedLines) {
+			Bitu y = 0, index = 0;
+			crtemu_glBindTexture(CRTEMU_GL_TEXTURE_2D, sdl.opengl.texture);
+			while (y < sdl.draw.height) {
+				if (!(index & 1)) {
+					y += changedLines[index];
+				} else {
+					Bit8u *pixels = (Bit8u *)sdl.opengl.framebuf + y * sdl.opengl.pitch;
+					Bitu height = changedLines[index];
+					crtemu_glTexSubImage2D(CRTEMU_GL_TEXTURE_2D, 0, 0, y,
+						sdl.draw.width, height, CRTEMU_GL_BGRA_EXT,
+						GL_UNSIGNED_INT_8_8_8_8_REV, pixels );
+					y += height;
+				}
+				index++;
+			}
+			crtemu_glCallList(sdl.opengl.displaylist);
+			SDL_GL_SwapBuffers();
+		}
+			}break;
+#endif
+	default:
+		break;
+	}
+}
+
+
+void GFX_SetPalette(Bitu start,Bitu count,GFX_PalEntry * entries) {
+	/* I should probably not change the GFX_PalEntry :) */
+	if (sdl.surface->flags & SDL_HWPALETTE) {
+		if (!SDL_SetPalette(sdl.surface,SDL_PHYSPAL,(SDL_Color *)entries,start,count)) {
+			E_Exit("SDL:Can't set palette");
+		}
+	} else {
+		if (!SDL_SetPalette(sdl.surface,SDL_LOGPAL,(SDL_Color *)entries,start,count)) {
+			E_Exit("SDL:Can't set palette");
+		}
+	}
+}
+
+Bitu GFX_GetRGB(Bit8u red,Bit8u green,Bit8u blue) {
+	switch (sdl.desktop.type) {
+	case SCREEN_SURFACE:
+	case SCREEN_SURFACE_DDRAW:
+		return SDL_MapRGB(sdl.surface->format,red,green,blue);
+	case SCREEN_OVERLAY:
+		{
+			Bit8u y =  ( 9797*(red) + 19237*(green) +  3734*(blue) ) >> 15;
+			Bit8u u =  (18492*((blue)-(y)) >> 15) + 128;
+			Bit8u v =  (23372*((red)-(y)) >> 15) + 128;
+#ifdef WORDS_BIGENDIAN
+			return (y << 0) | (v << 8) | (y << 16) | (u << 24);
+#else
+			return (u << 0) | (y << 8) | (v << 16) | (y << 24);
+#endif
+		}
+	case SCREEN_OPENGL:
+//		return ((red << 0) | (green << 8) | (blue << 16)) | (255 << 24);
+		//USE BGRA
+		return ((blue << 0) | (green << 8) | (red << 16)) | (255 << 24);
+	}
+	return 0;
+}
+
+void GFX_Stop() {
+	//if( crtemu ) {
+ //       crt_context.running = false;
+ //       SDL_WaitThread( crt_thread_ptr, NULL );
+ //   }
+	if (sdl.updating)
+		GFX_EndUpdate( 0 );
+	sdl.active=false;
+}
+
+void GFX_Start() {
+	sdl.active=true;
+	/*if (sdl.desktop.fullscreen)
+		{
+		RECT rect;
+		GetClientRect( GetDesktopWindow(), &rect );		
+		int height = rect.bottom - rect.top;
+		int width = rect.right - rect.left;
+
+		int newwidth = (int)((float)height * (4.0f / 3.0f));
+		int hborder = (int)((float)(abs(width - newwidth)) / 2.0f);
+		//glViewport(0, 0, rect.right - rect.left, rect.bottom - rect.top);
+		//ALERT - TESTING
+		crtemu_glViewport(hborder, 0, newwidth, height);
+		//crtemu_glViewport(hborder, 0, 1600, 900);
+		}*/
+	/*if (!crtemu)
+		{
+		crt_context.hdc = wglGetCurrentDC();
+		crt_context.gl_context = wglGetCurrentContext();
+		crt_context.mutex = SDL_CreateMutex();
+		crt_context.running = true;
+		crt_thread_ptr = SDL_CreateThread( crt_thread, &crt_context );
+		}*/
+}
+
+static void GUI_ShutDown(Section * /*sec*/) {
+	GFX_Stop();
+	if (sdl.draw.callback) (sdl.draw.callback)( GFX_CallBackStop );
+	if (sdl.mouse.locked) GFX_CaptureMouse();
+	if (sdl.desktop.fullscreen) GFX_SwitchFullScreen();
+}
+
+
+static void SetPriority(PRIORITY_LEVELS level) {
+
+#if C_SET_PRIORITY
+// Do nothing if priorties are not the same and not root, else the highest
+// priority can not be set as users can only lower priority (not restore it)
+
+	if((sdl.priority.focus != sdl.priority.nofocus ) &&
+		(getuid()!=0) ) return;
+
+#endif
+	switch (level) {
+#ifdef WIN32
+	case PRIORITY_LEVEL_PAUSE:	// if DOSBox is paused, assume idle priority
+	case PRIORITY_LEVEL_LOWEST:
+		SetPriorityClass(GetCurrentProcess(),IDLE_PRIORITY_CLASS);
+		break;
+	case PRIORITY_LEVEL_LOWER:
+		SetPriorityClass(GetCurrentProcess(),BELOW_NORMAL_PRIORITY_CLASS);
+		break;
+	case PRIORITY_LEVEL_NORMAL:
+		SetPriorityClass(GetCurrentProcess(),NORMAL_PRIORITY_CLASS);
+		break;
+	case PRIORITY_LEVEL_HIGHER:
+		SetPriorityClass(GetCurrentProcess(),ABOVE_NORMAL_PRIORITY_CLASS);
+		break;
+	case PRIORITY_LEVEL_HIGHEST:
+		SetPriorityClass(GetCurrentProcess(),HIGH_PRIORITY_CLASS);
+		break;
+#elif C_SET_PRIORITY
+/* Linux use group as dosbox has mulitple threads under linux */
+	case PRIORITY_LEVEL_PAUSE:	// if DOSBox is paused, assume idle priority
+	case PRIORITY_LEVEL_LOWEST:
+		setpriority (PRIO_PGRP, 0,PRIO_MAX);
+		break;
+	case PRIORITY_LEVEL_LOWER:
+		setpriority (PRIO_PGRP, 0,PRIO_MAX-(PRIO_TOTAL/3));
+		break;
+	case PRIORITY_LEVEL_NORMAL:
+		setpriority (PRIO_PGRP, 0,PRIO_MAX-(PRIO_TOTAL/2));
+		break;
+	case PRIORITY_LEVEL_HIGHER:
+		setpriority (PRIO_PGRP, 0,PRIO_MAX-((3*PRIO_TOTAL)/5) );
+		break;
+	case PRIORITY_LEVEL_HIGHEST:
+		setpriority (PRIO_PGRP, 0,PRIO_MAX-((3*PRIO_TOTAL)/4) );
+		break;
+#endif
+	default:
+		break;
+	}
+}
+
+extern Bit8u int10_font_14[256 * 14];
+static void OutputString(Bitu x,Bitu y,const char * text,Bit32u color,Bit32u color2,SDL_Surface * output_surface) {
+	Bit32u * draw=(Bit32u*)(((Bit8u *)output_surface->pixels)+((y)*output_surface->pitch))+x;
+	while (*text) {
+		Bit8u * font=&int10_font_14[(*text)*14];
+		Bitu i,j;
+		Bit32u * draw_line=draw;
+		for (i=0;i<14;i++) {
+			Bit8u map=*font++;
+			for (j=0;j<8;j++) {
+				if (map & 0x80) *((Bit32u*)(draw_line+j))=color; else *((Bit32u*)(draw_line+j))=color2;
+				map<<=1;
+			}
+			draw_line+=output_surface->pitch/4;
+		}
+		text++;
+		draw+=8;
+	}
+}
+
+#include "dosbox_splash.h"
+
+//extern void UI_Run(bool);
+void Restart(bool pressed);
+
+static void GUI_StartUp(Section * sec) {
+
+	//------------------------------------------------------
+
+	unsigned char* chararr;
+	unsigned int chararrsize;
+	std::string filename = "crt_frame.png";
+
+	std::vector<unsigned char> image;
+	bool success = load_image(image, filename, framewidth, frameheight, chararr, chararrsize);
+	if (success)
+	{
+		crt_frame_to_use = chararr;
+	}
+	else {
+		crt_frame_to_use = a_crt_frame;
+		framewidth = 1024;
+		frameheight = 1024;
+	}
+
+	//------------------------------------------------------
+
+
+	sec->AddDestroyFunction(&GUI_ShutDown);
+	Section_prop * section=static_cast<Section_prop *>(sec);
+	sdl.active=false;
+	sdl.updating=false;
+
+	GFX_SetIcon();
+
+	sdl.desktop.lazy_fullscreen=false;
+	sdl.desktop.lazy_fullscreen_req=false;
+
+	sdl.desktop.fullscreen=section->Get_bool("fullscreen");
+	sdl.wait_on_error=section->Get_bool("waitonerror");
+
+	Prop_multival* p=section->Get_multival("priority");
+	std::string focus = p->GetSection()->Get_string("active");
+	std::string notfocus = p->GetSection()->Get_string("inactive");
+
+	if      (focus == "lowest")  { sdl.priority.focus = PRIORITY_LEVEL_LOWEST;  }
+	else if (focus == "lower")   { sdl.priority.focus = PRIORITY_LEVEL_LOWER;   }
+	else if (focus == "normal")  { sdl.priority.focus = PRIORITY_LEVEL_NORMAL;  }
+	else if (focus == "higher")  { sdl.priority.focus = PRIORITY_LEVEL_HIGHER;  }
+	else if (focus == "highest") { sdl.priority.focus = PRIORITY_LEVEL_HIGHEST; }
+
+	if      (notfocus == "lowest")  { sdl.priority.nofocus=PRIORITY_LEVEL_LOWEST;  }
+	else if (notfocus == "lower")   { sdl.priority.nofocus=PRIORITY_LEVEL_LOWER;   }
+	else if (notfocus == "normal")  { sdl.priority.nofocus=PRIORITY_LEVEL_NORMAL;  }
+	else if (notfocus == "higher")  { sdl.priority.nofocus=PRIORITY_LEVEL_HIGHER;  }
+	else if (notfocus == "highest") { sdl.priority.nofocus=PRIORITY_LEVEL_HIGHEST; }
+	else if (notfocus == "pause")   {
+		/* we only check for pause here, because it makes no sense
+		 * for DOSBox to be paused while it has focus
+		 */
+		sdl.priority.nofocus=PRIORITY_LEVEL_PAUSE;
+	}
+
+	SetPriority(sdl.priority.focus); //Assume focus on startup
+	sdl.mouse.locked=false;
+	mouselocked=false; //Global for mapper
+	sdl.mouse.requestlock=false;
+	sdl.desktop.full.fixed=false;
+	const char* fullresolution=section->Get_string("fullresolution");
+	sdl.desktop.full.width  = 0;
+	sdl.desktop.full.height = 0;
+	if(fullresolution && *fullresolution) {
+		char res[100];
+		strncpy( res, fullresolution, sizeof( res ));
+		fullresolution = lowcase (res);//so x and X are allowed
+		if(strcmp(fullresolution,"original")) {
+			sdl.desktop.full.fixed = true;
+			char* height = const_cast<char*>(strchr(fullresolution,'x'));
+			if(height && * height) {
+				*height = 0;
+				sdl.desktop.full.height = (Bit16u)atoi(height+1);
+				sdl.desktop.full.width  = (Bit16u)atoi(res);
+			}
+		}
+	}
+
+	const char* windowresolution=section->Get_string("windowresolution");
+	if(windowresolution && *windowresolution) {
+		char res[100];
+		strncpy( res,windowresolution, sizeof( res ));
+		windowresolution = lowcase (res);//so x and X are allowed
+		if(strcmp(windowresolution,"original")) {
+			char* height = const_cast<char*>(strchr(windowresolution,'x'));
+			if(height && *height) {
+				*height = 0;
+				sdl.desktop.window.height = (Bit16u)atoi(height+1);
+				sdl.desktop.window.width  = (Bit16u)atoi(res);
+			}
+		}
+	}
+
+	sdl.desktop.doublebuf=section->Get_bool("fulldouble");
+	if (!sdl.desktop.full.width) {
+#ifdef WIN32
+		sdl.desktop.full.width=(Bit16u)GetSystemMetrics(SM_CXSCREEN);
+#else
+		sdl.desktop.full.width=1024;
+#endif
+	}
+	if (!sdl.desktop.full.height) {
+#ifdef WIN32
+		sdl.desktop.full.height=(Bit16u)GetSystemMetrics(SM_CYSCREEN);
+#else
+		sdl.desktop.full.height=768;
+#endif
+	}
+	sdl.mouse.autoenable=section->Get_bool("autolock");
+	if (!sdl.mouse.autoenable) SDL_ShowCursor(SDL_DISABLE);
+	sdl.mouse.autolock=false;
+	sdl.mouse.sensitivity=section->Get_int("sensitivity");
+	std::string output=section->Get_string("output");
+
+	/* Setup Mouse correctly if fullscreen */
+	if(sdl.desktop.fullscreen) GFX_CaptureMouse();
+
+	if (output == "surface") {
+		sdl.desktop.want_type=SCREEN_SURFACE;
+#if (HAVE_DDRAW_H) && defined(WIN32)
+	} else if (output == "ddraw") {
+		sdl.desktop.want_type=SCREEN_SURFACE_DDRAW;
+#endif
+	} else if (output == "overlay") {
+		sdl.desktop.want_type=SCREEN_OVERLAY;
+#if C_OPENGL
+	} else if (output == "opengl") {
+		sdl.desktop.want_type=SCREEN_OPENGL;
+		sdl.opengl.bilinear=true;
+	} else if (output == "openglnb") {
+		sdl.desktop.want_type=SCREEN_OPENGL;
+		sdl.opengl.bilinear=false;
+#endif
+	} else {
+		LOG_MSG("SDL:Unsupported output device %s, switching back to surface",output.c_str());
+		sdl.desktop.want_type=SCREEN_SURFACE;//SHOULDN'T BE POSSIBLE anymore
+	}
+
+	sdl.overlay=0;
+#if C_OPENGL
+   if(sdl.desktop.want_type==SCREEN_OPENGL){ /* OPENGL is requested */
+	sdl.surface=SDL_SetVideoMode(640,400,0,SDL_OPENGL);
+	if (sdl.surface == NULL) {
+		LOG_MSG("Could not initialize OpenGL, switching back to surface");
+		sdl.desktop.want_type=SCREEN_SURFACE;
+	} else {
+	sdl.opengl.framebuf=0;
+	sdl.opengl.texture=0;
+	sdl.opengl.texture2 = 1;
+	sdl.opengl.displaylist=0;
+
+	//ALERT - time to port more code
+	//------------------------------------------------------------
+
+	gl_dll = LoadLibraryA("opengl32.dll");
+	//if (!gl_dll) return 1;
+
+	crtemu_wglGetProcAddress = (int (CRTEMU_GLCALLTYPE*)(char const*)) (uintptr_t) GetProcAddress(gl_dll, "wglGetProcAddress");
+	//if (!crtemu_wglGetProcAddress) return 1;
+
+	crtemu_wglSwapIntervalEXT = (BOOL(CRTEMU_GLCALLTYPE*)(int)) (uintptr_t) crtemu_wglGetProcAddress("wglSwapIntervalEXT");
+	if (crtemu_wglSwapIntervalEXT) crtemu_wglSwapIntervalEXT(1);
+
+	// Attempt to bind opengl functions using GetProcAddress
+	crtemu_glTexParameterfv = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLenum, CRTEMU_GLfloat const*)) (uintptr_t) GetProcAddress(gl_dll, "glTexParameterfv");
+	crtemu_glDeleteFramebuffers = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLsizei, CRTEMU_GLuint const*)) (uintptr_t) GetProcAddress(gl_dll, "glDeleteFramebuffers");
+	crtemu_glGetIntegerv = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLint*)) (uintptr_t) GetProcAddress(gl_dll, "glGetIntegerv");
+	crtemu_glGenFramebuffers = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLsizei, CRTEMU_GLuint*)) (uintptr_t) GetProcAddress(gl_dll, "glGenFramebuffers");
+	crtemu_glBindFramebuffer = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLuint)) (uintptr_t) GetProcAddress(gl_dll, "glBindFramebuffer");
+	crtemu_glUniform1f = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLint, CRTEMU_GLfloat)) (uintptr_t) GetProcAddress(gl_dll, "glUniform1f");
+	crtemu_glUniform2f = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLint, CRTEMU_GLfloat, CRTEMU_GLfloat)) (uintptr_t) GetProcAddress(gl_dll, "glUniform2f");
+	crtemu_glFramebufferTexture2D = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLenum, CRTEMU_GLenum, CRTEMU_GLuint, CRTEMU_GLint)) (uintptr_t) GetProcAddress(gl_dll, "glFramebufferTexture2D");
+	crtemu_glCreateShader = (CRTEMU_GLuint(CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum)) (uintptr_t) GetProcAddress(gl_dll, "glCreateShader");
+	crtemu_glShaderSource = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLsizei, CRTEMU_GLchar const* const*, CRTEMU_GLint const*)) (uintptr_t) GetProcAddress(gl_dll, "glShaderSource");
+	crtemu_glCompileShader = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint)) (uintptr_t) GetProcAddress(gl_dll, "glCompileShader");
+	crtemu_glGetShaderiv = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLenum, CRTEMU_GLint*)) (uintptr_t) GetProcAddress(gl_dll, "glGetShaderiv");
+	crtemu_glCreateProgram = (CRTEMU_GLuint(CRTEMU_GLCALLTYPE*) (void)) (uintptr_t) GetProcAddress(gl_dll, "glCreateProgram");
+	crtemu_glAttachShader = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLuint)) (uintptr_t) GetProcAddress(gl_dll, "glAttachShader");
+	crtemu_glBindAttribLocation = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLuint, CRTEMU_GLchar const*)) (uintptr_t) GetProcAddress(gl_dll, "glBindAttribLocation");
+	crtemu_glLinkProgram = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint)) (uintptr_t) GetProcAddress(gl_dll, "glLinkProgram");
+	crtemu_glGetProgramiv = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLenum, CRTEMU_GLint*)) (uintptr_t) GetProcAddress(gl_dll, "glGetProgramiv");
+	crtemu_glGenBuffers = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLsizei, CRTEMU_GLuint*)) (uintptr_t) GetProcAddress(gl_dll, "glGenBuffers");
+	crtemu_glBindBuffer = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLuint)) (uintptr_t) GetProcAddress(gl_dll, "glBindBuffer");
+	crtemu_glEnableVertexAttribArray = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint)) (uintptr_t) GetProcAddress(gl_dll, "glEnableVertexAttribArray");
+	crtemu_glVertexAttribPointer = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLint, CRTEMU_GLenum, CRTEMU_GLboolean, CRTEMU_GLsizei, void const*)) (uintptr_t) GetProcAddress(gl_dll, "glVertexAttribPointer");
+	crtemu_glGenTextures = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLsizei, CRTEMU_GLuint*)) (uintptr_t) GetProcAddress(gl_dll, "glGenTextures");
+	crtemu_glEnable = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum)) (uintptr_t) GetProcAddress(gl_dll, "glEnable");
+	crtemu_glActiveTexture = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum)) (uintptr_t) GetProcAddress(gl_dll, "glActiveTexture");
+	crtemu_glBindTexture = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLuint)) (uintptr_t) GetProcAddress(gl_dll, "glBindTexture");
+	crtemu_glTexParameteri = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLenum, CRTEMU_GLint)) (uintptr_t) GetProcAddress(gl_dll, "glTexParameteri");
+	crtemu_glDeleteBuffers = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLsizei, CRTEMU_GLuint const*)) (uintptr_t) GetProcAddress(gl_dll, "glDeleteBuffers");
+	crtemu_glDeleteTextures = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLsizei, CRTEMU_GLuint const*)) (uintptr_t) GetProcAddress(gl_dll, "glDeleteTextures");
+	crtemu_glBufferData = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLsizeiptr, void const*, CRTEMU_GLenum)) (uintptr_t) GetProcAddress(gl_dll, "glBufferData");
+	crtemu_glUseProgram = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint)) (uintptr_t) GetProcAddress(gl_dll, "glUseProgram");
+	crtemu_glUniform1i = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLint, CRTEMU_GLint)) (uintptr_t) GetProcAddress(gl_dll, "glUniform1i");
+	crtemu_glUniform3f = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLint, CRTEMU_GLfloat, CRTEMU_GLfloat, CRTEMU_GLfloat)) (uintptr_t) GetProcAddress(gl_dll, "glUniform3f");
+	crtemu_glGetUniformLocation = (CRTEMU_GLint(CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLchar const*)) (uintptr_t) GetProcAddress(gl_dll, "glGetUniformLocation");
+	crtemu_glTexImage2D = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLint, CRTEMU_GLint, CRTEMU_GLsizei, CRTEMU_GLsizei, CRTEMU_GLint, CRTEMU_GLenum, CRTEMU_GLenum, void const*)) (uintptr_t) GetProcAddress(gl_dll, "glTexImage2D");
+	crtemu_glClearColor = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLfloat, CRTEMU_GLfloat, CRTEMU_GLfloat, CRTEMU_GLfloat)) (uintptr_t) GetProcAddress(gl_dll, "glClearColor");
+	crtemu_glClear = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLbitfield)) (uintptr_t) GetProcAddress(gl_dll, "glClear");
+	crtemu_glDrawArrays = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLint, CRTEMU_GLsizei)) (uintptr_t) GetProcAddress(gl_dll, "glDrawArrays");
+	crtemu_glViewport = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLint, CRTEMU_GLint, CRTEMU_GLsizei, CRTEMU_GLsizei)) (uintptr_t) GetProcAddress(gl_dll, "glViewport");
+	crtemu_glDeleteShader = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint)) (uintptr_t) GetProcAddress(gl_dll, "glDeleteShader");
+	crtemu_glDeleteProgram = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint)) (uintptr_t) GetProcAddress(gl_dll, "glDeleteProgram");
+	crtemu_glMatrixMode = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum)) (uintptr_t) GetProcAddress(gl_dll, "glMatrixMode");
+	crtemu_glEnableClientState = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum)) (uintptr_t) GetProcAddress(gl_dll, "glEnableClientState");
+	crtemu_glShadeModel = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum)) (uintptr_t) GetProcAddress(gl_dll, "glShadeModel");
+	crtemu_glDisable = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum)) (uintptr_t) GetProcAddress(gl_dll, "glDisable");
+	crtemu_glLoadIdentity = (void (CRTEMU_GLCALLTYPE*) (void)) (uintptr_t) GetProcAddress(gl_dll, "glLoadIdentity");
+	crtemu_glIsList = (CRTEMU_GLboolean(CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint)) (uintptr_t) GetProcAddress(gl_dll, "glIsList");
+	crtemu_glDeleteLists = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLsizei)) (uintptr_t) GetProcAddress(gl_dll, "glDeleteLists");
+	crtemu_glGenLists = (CRTEMU_GLuint(CRTEMU_GLCALLTYPE*) (CRTEMU_GLsizei)) (uintptr_t) GetProcAddress(gl_dll, "glGenLists");
+	crtemu_glNewList = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLenum)) (uintptr_t) GetProcAddress(gl_dll, "glNewList");
+	crtemu_glBegin = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum)) (uintptr_t) GetProcAddress(gl_dll, "glBegin");
+	crtemu_glTexCoord2f = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLfloat, CRTEMU_GLfloat)) (uintptr_t) GetProcAddress(gl_dll, "glTexCoord2f");
+	crtemu_glVertex2f = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLfloat, CRTEMU_GLfloat)) (uintptr_t) GetProcAddress(gl_dll, "glVertex2f");
+	crtemu_glEnd = (void (CRTEMU_GLCALLTYPE*) (void)) (uintptr_t) GetProcAddress(gl_dll, "glEnd");
+	crtemu_glEndList = (void (CRTEMU_GLCALLTYPE*) (void)) (uintptr_t) GetProcAddress(gl_dll, "glEndList");
+	crtemu_glTexSubImage2D = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLint, CRTEMU_GLint, CRTEMU_GLint, CRTEMU_GLsizei, CRTEMU_GLsizei, CRTEMU_GLenum, CRTEMU_GLenum, const CRTEMU_GLvoid*)) (uintptr_t) GetProcAddress(gl_dll, "glTexSubImage2D");
+	crtemu_glCallList = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint)) (uintptr_t) GetProcAddress(gl_dll, "glCallList");
+	crtemu_glGetString = (const CRTEMU_GLubyte * (CRTEMU_GLCALLTYPE*)(CRTEMU_GLenum)) (uintptr_t) GetProcAddress(gl_dll, "glGetString");
+#ifdef CRTEMU_REPORT_SHADER_ERRORS
+	crtemu_glGetShaderInfoLog = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLsizei, CRTEMU_GLsizei*, CRTEMU_GLchar*)) (uintptr_t) GetProcAddress(gl_dll, "glGetShaderInfoLog");
+#endif
+
+	// Any opengl functions which didn't bind, try binding them using wglGetProcAddrss
+	if (!crtemu_glTexParameterfv) crtemu_glTexParameterfv = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLenum, CRTEMU_GLfloat const*)) (uintptr_t) crtemu_wglGetProcAddress("glTexParameterfv");
+	if (!crtemu_glDeleteFramebuffers) crtemu_glDeleteFramebuffers = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLsizei, CRTEMU_GLuint const*)) (uintptr_t) crtemu_wglGetProcAddress("glDeleteFramebuffers");
+	if (!crtemu_glGetIntegerv) crtemu_glGetIntegerv = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLint*)) (uintptr_t) crtemu_wglGetProcAddress("glGetIntegerv");
+	if (!crtemu_glGenFramebuffers) crtemu_glGenFramebuffers = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLsizei, CRTEMU_GLuint*)) (uintptr_t) crtemu_wglGetProcAddress("glGenFramebuffers");
+	if (!crtemu_glBindFramebuffer) crtemu_glBindFramebuffer = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLuint)) (uintptr_t) crtemu_wglGetProcAddress("glBindFramebuffer");
+	if (!crtemu_glUniform1f) crtemu_glUniform1f = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLint, CRTEMU_GLfloat)) (uintptr_t) crtemu_wglGetProcAddress("glUniform1f");
+	if (!crtemu_glUniform2f) crtemu_glUniform2f = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLint, CRTEMU_GLfloat, CRTEMU_GLfloat)) (uintptr_t) crtemu_wglGetProcAddress("glUniform2f");
+	if (!crtemu_glFramebufferTexture2D) crtemu_glFramebufferTexture2D = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLenum, CRTEMU_GLenum, CRTEMU_GLuint, CRTEMU_GLint)) (uintptr_t) crtemu_wglGetProcAddress("glFramebufferTexture2D");
+	if (!crtemu_glCreateShader) crtemu_glCreateShader = (CRTEMU_GLuint(CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum)) (uintptr_t) crtemu_wglGetProcAddress("glCreateShader");
+	if (!crtemu_glShaderSource) crtemu_glShaderSource = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLsizei, CRTEMU_GLchar const* const*, CRTEMU_GLint const*)) (uintptr_t) crtemu_wglGetProcAddress("glShaderSource");
+	if (!crtemu_glCompileShader) crtemu_glCompileShader = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint)) (uintptr_t) crtemu_wglGetProcAddress("glCompileShader");
+	if (!crtemu_glGetShaderiv) crtemu_glGetShaderiv = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLenum, CRTEMU_GLint*)) (uintptr_t) crtemu_wglGetProcAddress("glGetShaderiv");
+	if (!crtemu_glCreateProgram) crtemu_glCreateProgram = (CRTEMU_GLuint(CRTEMU_GLCALLTYPE*) (void)) (uintptr_t) crtemu_wglGetProcAddress("glCreateProgram");
+	if (!crtemu_glAttachShader) crtemu_glAttachShader = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLuint)) (uintptr_t) crtemu_wglGetProcAddress("glAttachShader");
+	if (!crtemu_glBindAttribLocation) crtemu_glBindAttribLocation = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLuint, CRTEMU_GLchar const*)) (uintptr_t) crtemu_wglGetProcAddress("glBindAttribLocation");
+	if (!crtemu_glLinkProgram) crtemu_glLinkProgram = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint)) (uintptr_t) crtemu_wglGetProcAddress("glLinkProgram");
+	if (!crtemu_glGetProgramiv) crtemu_glGetProgramiv = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLenum, CRTEMU_GLint*)) (uintptr_t) crtemu_wglGetProcAddress("glGetProgramiv");
+	if (!crtemu_glGenBuffers) crtemu_glGenBuffers = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLsizei, CRTEMU_GLuint*)) (uintptr_t) crtemu_wglGetProcAddress("glGenBuffers");
+	if (!crtemu_glBindBuffer) crtemu_glBindBuffer = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLuint)) (uintptr_t) crtemu_wglGetProcAddress("glBindBuffer");
+	if (!crtemu_glEnableVertexAttribArray) crtemu_glEnableVertexAttribArray = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint)) (uintptr_t) crtemu_wglGetProcAddress("glEnableVertexAttribArray");
+	if (!crtemu_glVertexAttribPointer) crtemu_glVertexAttribPointer = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLint, CRTEMU_GLenum, CRTEMU_GLboolean, CRTEMU_GLsizei, void const*)) (uintptr_t) crtemu_wglGetProcAddress("glVertexAttribPointer");
+	if (!crtemu_glGenTextures) crtemu_glGenTextures = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLsizei, CRTEMU_GLuint*)) (uintptr_t) crtemu_wglGetProcAddress("glGenTextures");
+	if (!crtemu_glEnable) crtemu_glEnable = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum)) (uintptr_t) crtemu_wglGetProcAddress("glEnable");
+	if (!crtemu_glActiveTexture) crtemu_glActiveTexture = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum)) (uintptr_t) crtemu_wglGetProcAddress("glActiveTexture");
+	if (!crtemu_glBindTexture) crtemu_glBindTexture = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLuint)) (uintptr_t) crtemu_wglGetProcAddress("glBindTexture");
+	if (!crtemu_glTexParameteri) crtemu_glTexParameteri = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLenum, CRTEMU_GLint)) (uintptr_t) crtemu_wglGetProcAddress("glTexParameteri");
+	if (!crtemu_glDeleteBuffers) crtemu_glDeleteBuffers = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLsizei, CRTEMU_GLuint const*)) (uintptr_t) crtemu_wglGetProcAddress("glDeleteBuffers");
+	if (!crtemu_glDeleteTextures) crtemu_glDeleteTextures = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLsizei, CRTEMU_GLuint const*)) (uintptr_t) crtemu_wglGetProcAddress("glDeleteTextures");
+	if (!crtemu_glBufferData) crtemu_glBufferData = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLsizeiptr, void const*, CRTEMU_GLenum)) (uintptr_t) crtemu_wglGetProcAddress("glBufferData");
+	if (!crtemu_glUseProgram) crtemu_glUseProgram = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint)) (uintptr_t) crtemu_wglGetProcAddress("glUseProgram");
+	if (!crtemu_glUniform1i) crtemu_glUniform1i = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLint, CRTEMU_GLint)) (uintptr_t) crtemu_wglGetProcAddress("glUniform1i");
+	if (!crtemu_glUniform3f) crtemu_glUniform3f = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLint, CRTEMU_GLfloat, CRTEMU_GLfloat, CRTEMU_GLfloat)) (uintptr_t) crtemu_wglGetProcAddress("glUniform3f");
+	if (!crtemu_glGetUniformLocation) crtemu_glGetUniformLocation = (CRTEMU_GLint(CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLchar const*)) (uintptr_t) crtemu_wglGetProcAddress("glGetUniformLocation");
+	if (!crtemu_glTexImage2D) crtemu_glTexImage2D = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLint, CRTEMU_GLint, CRTEMU_GLsizei, CRTEMU_GLsizei, CRTEMU_GLint, CRTEMU_GLenum, CRTEMU_GLenum, void const*)) (uintptr_t) crtemu_wglGetProcAddress("glTexImage2D");
+	if (!crtemu_glClearColor) crtemu_glClearColor = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLfloat, CRTEMU_GLfloat, CRTEMU_GLfloat, CRTEMU_GLfloat)) (uintptr_t) crtemu_wglGetProcAddress("glClearColor");
+	if (!crtemu_glClear) crtemu_glClear = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLbitfield)) (uintptr_t) crtemu_wglGetProcAddress("glClear");
+	if (!crtemu_glDrawArrays) crtemu_glDrawArrays = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLint, CRTEMU_GLsizei)) (uintptr_t) crtemu_wglGetProcAddress("glDrawArrays");
+	if (!crtemu_glViewport) crtemu_glViewport = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLint, CRTEMU_GLint, CRTEMU_GLsizei, CRTEMU_GLsizei)) (uintptr_t) crtemu_wglGetProcAddress("glViewport");
+	if (!crtemu_glDeleteShader) crtemu_glDeleteShader = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint)) (uintptr_t) crtemu_wglGetProcAddress("glDeleteShader");
+	if (!crtemu_glDeleteProgram) crtemu_glDeleteProgram = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint)) (uintptr_t) crtemu_wglGetProcAddress("glDeleteProgram");
+	if (!crtemu_glMatrixMode) crtemu_glMatrixMode = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum)) (uintptr_t) crtemu_wglGetProcAddress("glMatrixMode");
+	if (!crtemu_glEnableClientState) crtemu_glEnableClientState = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum)) (uintptr_t) crtemu_wglGetProcAddress("glEnableClientState");
+	if (!crtemu_glShadeModel) crtemu_glShadeModel = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum)) (uintptr_t) crtemu_wglGetProcAddress("glShadeModel");
+	if (!crtemu_glDisable) crtemu_glDisable = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum)) (uintptr_t) crtemu_wglGetProcAddress("glDisable");
+	if (!crtemu_glLoadIdentity) crtemu_glLoadIdentity = (void (CRTEMU_GLCALLTYPE*) (void)) (uintptr_t) crtemu_wglGetProcAddress("glLoadIdentity");
+	if (!crtemu_glIsList) crtemu_glIsList = (CRTEMU_GLboolean(CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint)) (uintptr_t) crtemu_wglGetProcAddress("glIsList");
+	if (!crtemu_glDeleteLists) crtemu_glDeleteLists = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLsizei)) (uintptr_t) crtemu_wglGetProcAddress("glDeleteLists");
+	if (!crtemu_glGenLists) crtemu_glGenLists = (CRTEMU_GLuint(CRTEMU_GLCALLTYPE*) (CRTEMU_GLsizei)) (uintptr_t) crtemu_wglGetProcAddress("glGenLists");
+	if (!crtemu_glNewList) crtemu_glNewList = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLenum)) (uintptr_t) crtemu_wglGetProcAddress("glNewList");
+	if (!crtemu_glBegin) crtemu_glBegin = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum)) (uintptr_t) crtemu_wglGetProcAddress("glBegin");
+	if (!crtemu_glTexCoord2f) crtemu_glTexCoord2f = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLfloat, CRTEMU_GLfloat)) (uintptr_t) crtemu_wglGetProcAddress("glTexCoord2f");
+	if (!crtemu_glVertex2f) crtemu_glVertex2f = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLfloat, CRTEMU_GLfloat)) (uintptr_t) crtemu_wglGetProcAddress("glVertex2f");
+	if (!crtemu_glEnd) crtemu_glEnd = (void (CRTEMU_GLCALLTYPE*) (void)) (uintptr_t) crtemu_wglGetProcAddress("glEnd");
+	if (!crtemu_glEndList) crtemu_glEndList = (void (CRTEMU_GLCALLTYPE*) (void)) (uintptr_t) crtemu_wglGetProcAddress("glEndList");
+	if (!crtemu_glTexSubImage2D) crtemu_glTexSubImage2D = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLenum, CRTEMU_GLint, CRTEMU_GLint, CRTEMU_GLint, CRTEMU_GLsizei, CRTEMU_GLsizei, CRTEMU_GLenum, CRTEMU_GLenum, const CRTEMU_GLvoid*)) (uintptr_t) crtemu_wglGetProcAddress("glTexSubImage2D");
+	if (!crtemu_glCallList) crtemu_glCallList = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint)) (uintptr_t) crtemu_wglGetProcAddress("glCallList");
+	if (!crtemu_glGetString) crtemu_glGetString = (const CRTEMU_GLubyte * (CRTEMU_GLCALLTYPE*)(CRTEMU_GLenum)) (uintptr_t) crtemu_wglGetProcAddress("glGetString");
+#ifdef CRTEMU_REPORT_SHADER_ERRORS
+	if (!crtemu_glGetShaderInfoLog) crtemu_glGetShaderInfoLog = (void (CRTEMU_GLCALLTYPE*) (CRTEMU_GLuint, CRTEMU_GLsizei, CRTEMU_GLsizei*, CRTEMU_GLchar*)) (uintptr_t) crtemu_wglGetProcAddress("glGetShaderInfoLog");
+#endif
+
+	// Report error if any gl function was not found.
+	/*if (!crtemu_glTexParameterfv) goto failed;
+	if (!crtemu_glDeleteFramebuffers) return 1;
+	if (!crtemu_glGetIntegerv) return 1;
+	if (!crtemu_glGenFramebuffers) return 1;
+	if (!crtemu_glBindFramebuffer) return 1;
+	if (!crtemu_glUniform1f) return 1;
+	if (!crtemu_glUniform2f) return 1;
+	if (!crtemu_glFramebufferTexture2D) return 1;
+	if (!crtemu_glCreateShader) return 1;
+	if (!crtemu_glShaderSource) return 1;
+	if (!crtemu_glCompileShader) return 1;
+	if (!crtemu_glGetShaderiv) return 1;
+	if (!crtemu_glCreateProgram) return 1;
+	if (!crtemu_glAttachShader) return 1;
+	if (!crtemu_glBindAttribLocation) return 1;
+	if (!crtemu_glLinkProgram) return 1;
+	if (!crtemu_glGetProgramiv) return 1;
+	if (!crtemu_glGenBuffers) return 1;
+	if (!crtemu_glBindBuffer) return 1;
+	if (!crtemu_glEnableVertexAttribArray) return 1;
+	if (!crtemu_glVertexAttribPointer) return 1;
+	if (!crtemu_glGenTextures) return 1;
+	if (!crtemu_glEnable) return 1;
+	if (!crtemu_glActiveTexture) return 1;
+	if (!crtemu_glBindTexture) return 1;
+	if (!crtemu_glTexParameteri) return 1;
+	if (!crtemu_glDeleteBuffers) return 1;
+	if (!crtemu_glDeleteTextures) return 1;
+	if (!crtemu_glBufferData) return 1;
+	if (!crtemu_glUseProgram) return 1;
+	if (!crtemu_glUniform1i) return 1;
+	if (!crtemu_glUniform3f) return 1;
+	if (!crtemu_glGetUniformLocation) return 1;
+	if (!crtemu_glTexImage2D) return 1;
+	if (!crtemu_glClearColor) return 1;
+	if (!crtemu_glClear) return 1;
+	if (!crtemu_glDrawArrays) return 1;
+	if (!crtemu_glViewport) return 1;
+	if (!crtemu_glDeleteShader) return 1;
+	if (!crtemu_glDeleteProgram) return 1;
+	if (!crtemu_glMatrixMode) return 1;
+	if (!crtemu_glEnableClientState) return 1;
+	if (!crtemu_glShadeModel) return 1;
+	if (!crtemu_glDisable) return 1;
+	if (!crtemu_glLoadIdentity) return 1;
+	if (!crtemu_glIsList) return 1;
+	if (!crtemu_glDeleteLists) return 1;
+	if (!crtemu_glGenLists) return 1;
+	if (!crtemu_glNewList) return 1;
+	if (!crtemu_glBegin) return 1;
+	if (!crtemu_glTexCoord2f) return 1;
+	if (!crtemu_glVertex2f) return 1;
+	if (!crtemu_glEnd) return 1;
+	if (!crtemu_glEndList) return 1;
+	if (!crtemu_glTexSubImage2D) return 1;
+	if (!crtemu_glCallList) return 1;
+	if (!crtemu_glGetString) return 1;
+#ifdef CRTEMU_REPORT_SHADER_ERRORS
+	if (!crtemu_glGetShaderInfoLog) return 1;
+#endi*/
+
+	//------------------------------------------------------------
+
+	crtemu_glGetIntegerv (CRTEMU_GL_MAX_TEXTURE_SIZE, &sdl.opengl.max_texsize);
+#if defined(__WIN32__) && defined(NVIDIA_PixelDataRange)
+	crtemu_glPixelDataRangeNV = (PFNGLPIXELDATARANGENVPROC) wglGetProcAddress("glPixelDataRangeNV");
+	db_glAllocateMemoryNV = (PFNWGLALLOCATEMEMORYNVPROC) wglGetProcAddress("wglAllocateMemoryNV");
+	db_glFreeMemoryNV = (PFNWGLFREEMEMORYNVPROC) wglGetProcAddress("wglFreeMemoryNV");
+#endif
+	const char * gl_ext = (const char *)glGetString (CRTEMU_GL_EXTENSIONS);
+	if(gl_ext && *gl_ext){
+		sdl.opengl.packed_pixel=(strstr(gl_ext,"EXT_packed_pixels") > 0);
+		sdl.opengl.paletted_texture=(strstr(gl_ext,"EXT_paletted_texture") > 0);
+#if defined(NVIDIA_PixelDataRange)
+		sdl.opengl.pixel_data_range=(strstr(gl_ext,"GL_NV_pixel_data_range") >0 ) &&
+			crtemu_glPixelDataRangeNV && db_glAllocateMemoryNV && db_glFreeMemoryNV;
+		sdl.opengl.pixel_data_range = 0;
+#endif
+    	} else {
+		sdl.opengl.packed_pixel=sdl.opengl.paletted_texture=false;
+	}
+	}
+	} /* OPENGL is requested end */
+
+#endif	//OPENGL
+	/* Initialize screen for first time */
+	sdl.surface=SDL_SetVideoMode(640,400,0,0);
+	if (sdl.surface == NULL) E_Exit("Could not initialize video: %s",SDL_GetError());
+	sdl.desktop.bpp=sdl.surface->format->BitsPerPixel;
+	if (sdl.desktop.bpp==24) {
+		LOG_MSG("SDL:You are running in 24 bpp mode, this will slow down things!");
+	}
+	GFX_Stop();
+	SDL_WM_SetCaption("DOSBox",VERSION);
+
+/* The endian part is intentionally disabled as somehow it produces correct results without according to rhoenie*/
+//#if SDL_BYTEORDER == SDL_BIG_ENDIAN
+//    Bit32u rmask = 0xff000000;
+//    Bit32u gmask = 0x00ff0000;
+//    Bit32u bmask = 0x0000ff00;
+//#else
+    Bit32u rmask = 0x000000ff;
+    Bit32u gmask = 0x0000ff00;
+    Bit32u bmask = 0x00ff0000;
+//#endif
+
+/* Please leave the Splash screen stuff in working order in DOSBox. We spend a lot of time making DOSBox. */
+	SDL_Surface* splash_surf = SDL_CreateRGBSurface(SDL_SWSURFACE, 640, 400, 32, rmask, gmask, bmask, 0);
+	if (splash_surf) {
+		SDL_FillRect(splash_surf, NULL, SDL_MapRGB(splash_surf->format, 0, 0, 0));
+
+		Bit8u* tmpbufp = new Bit8u[640*400*3];
+		GIMP_IMAGE_RUN_LENGTH_DECODE(tmpbufp,gimp_image.rle_pixel_data,640*400,3);
+		for (Bitu y=0; y<400; y++) {
+
+			Bit8u* tmpbuf = tmpbufp + y*640*3;
+			Bit32u * draw=(Bit32u*)(((Bit8u *)splash_surf->pixels)+((y)*splash_surf->pitch));
+			for (Bitu x=0; x<640; x++) {
+//#if SDL_BYTEORDER == SDL_BIG_ENDIAN
+//				*draw++ = tmpbuf[x*3+2]+tmpbuf[x*3+1]*0x100+tmpbuf[x*3+0]*0x10000+0x00000000;
+//#else
+				*draw++ = tmpbuf[x*3+0]+tmpbuf[x*3+1]*0x100+tmpbuf[x*3+2]*0x10000+0x00000000;
+//#endif
+			}
+		}
+
+		bool exit_splash = false;
+
+		static Bitu max_splash_loop = 600;
+		static Bitu splash_fade = 100;
+		static bool use_fadeout = true;
+
+		for (Bit32u ct = 0,startticks = GetTicks();ct < max_splash_loop;ct = GetTicks()-startticks) {
+			SDL_Event evt;
+			while (SDL_PollEvent(&evt)) {
+				if (evt.type == SDL_QUIT) {
+					exit_splash = true;
+					break;
+				}
+			}
+			if (exit_splash) break;
+
+			if (ct<1) {
+				SDL_FillRect(sdl.surface, NULL, SDL_MapRGB(sdl.surface->format, 0, 0, 0));
+				SDL_SetAlpha(splash_surf, SDL_SRCALPHA,255);
+				SDL_BlitSurface(splash_surf, NULL, sdl.surface, NULL);
+				SDL_Flip(sdl.surface);
+			} else if (ct>=max_splash_loop-splash_fade) {
+				if (use_fadeout) {
+					SDL_FillRect(sdl.surface, NULL, SDL_MapRGB(sdl.surface->format, 0, 0, 0));
+					SDL_SetAlpha(splash_surf, SDL_SRCALPHA, (Bit8u)((max_splash_loop-1-ct)*255/(splash_fade-1)));
+					SDL_BlitSurface(splash_surf, NULL, sdl.surface, NULL);
+					SDL_Flip(sdl.surface);
+				}
+			}
+
+		}
+
+		if (use_fadeout) {
+			SDL_FillRect(sdl.surface, NULL, SDL_MapRGB(sdl.surface->format, 0, 0, 0));
+			SDL_Flip(sdl.surface);
+		}
+		SDL_FreeSurface(splash_surf);
+		delete [] tmpbufp;
+
+	}
+
+	/* Get some Event handlers */
+	MAPPER_AddHandler(KillSwitch,MK_f9,MMOD1,"shutdown","ShutDown");
+	MAPPER_AddHandler(CaptureMouse,MK_f10,MMOD1,"capmouse","Cap Mouse");
+	MAPPER_AddHandler(SwitchFullScreen,MK_return,MMOD2,"fullscr","Fullscreen");
+	MAPPER_AddHandler(Restart,MK_home,MMOD1|MMOD2,"restart","Restart");
+#if C_DEBUG
+	/* Pause binds with activate-debugger */
+#else
+	MAPPER_AddHandler(&PauseDOSBox, MK_pause, MMOD2, "pause", "Pause");
+#endif
+	/* Get Keyboard state of numlock and capslock */
+	SDLMod keystate = SDL_GetModState();
+	if(keystate&KMOD_NUM) startup_state_numlock = true;
+	if(keystate&KMOD_CAPS) startup_state_capslock = true;
+}
+
+void Mouse_AutoLock(bool enable) {
+	sdl.mouse.autolock=enable;
+	if (sdl.mouse.autoenable) sdl.mouse.requestlock=enable;
+	else {
+		SDL_ShowCursor(enable?SDL_DISABLE:SDL_ENABLE);
+		sdl.mouse.requestlock=false;
+	}
+}
+
+static void HandleMouseMotion(SDL_MouseMotionEvent * motion) {
+	if (sdl.mouse.locked || !sdl.mouse.autoenable)
+		Mouse_CursorMoved((float)motion->xrel*sdl.mouse.sensitivity/100.0f,
+						  (float)motion->yrel*sdl.mouse.sensitivity/100.0f,
+						  (float)(motion->x-sdl.clip.x)/(sdl.clip.w-1)*sdl.mouse.sensitivity/100.0f,
+						  (float)(motion->y-sdl.clip.y)/(sdl.clip.h-1)*sdl.mouse.sensitivity/100.0f,
+						  sdl.mouse.locked);
+}
+
+static void HandleMouseButton(SDL_MouseButtonEvent * button) {
+	switch (button->state) {
+	case SDL_PRESSED:
+		if (sdl.mouse.requestlock && !sdl.mouse.locked) {
+			GFX_CaptureMouse();
+			// Dont pass klick to mouse handler
+			break;
+		}
+		if (!sdl.mouse.autoenable && sdl.mouse.autolock && button->button == SDL_BUTTON_MIDDLE) {
+			GFX_CaptureMouse();
+			break;
+		}
+		switch (button->button) {
+		case SDL_BUTTON_LEFT:
+			Mouse_ButtonPressed(0);
+			break;
+		case SDL_BUTTON_RIGHT:
+			Mouse_ButtonPressed(1);
+			break;
+		case SDL_BUTTON_MIDDLE:
+			Mouse_ButtonPressed(2);
+			break;
+		}
+		break;
+	case SDL_RELEASED:
+		switch (button->button) {
+		case SDL_BUTTON_LEFT:
+			Mouse_ButtonReleased(0);
+			break;
+		case SDL_BUTTON_RIGHT:
+			Mouse_ButtonReleased(1);
+			break;
+		case SDL_BUTTON_MIDDLE:
+			Mouse_ButtonReleased(2);
+			break;
+		}
+		break;
+	}
+}
+
+void GFX_LosingFocus(void) {
+	sdl.laltstate=SDL_KEYUP;
+	sdl.raltstate=SDL_KEYUP;
+	MAPPER_LosingFocus();
+}
+
+bool GFX_IsFullscreen(void) {
+	return sdl.desktop.fullscreen;
+}
+
+void GFX_Events() {
+	SDL_Event event;
+#if defined (REDUCE_JOYSTICK_POLLING)
+	static int poll_delay=0;
+	int time=GetTicks();
+	if (time-poll_delay>20) {
+		poll_delay=time;
+		if (sdl.num_joysticks>0) SDL_JoystickUpdate();
+		MAPPER_UpdateJoysticks();
+	}
+#endif
+	while (SDL_PollEvent(&event)) {
+		switch (event.type) {
+		case SDL_ACTIVEEVENT:
+			if (event.active.state & SDL_APPINPUTFOCUS) {
+				if (event.active.gain) {
+					if (sdl.desktop.fullscreen && !sdl.mouse.locked)
+						GFX_CaptureMouse();
+					SetPriority(sdl.priority.focus);
+					CPU_Disable_SkipAutoAdjust();
+				} else {
+					if (sdl.mouse.locked) {
+#ifdef WIN32
+						if (sdl.desktop.fullscreen) {
+							VGA_KillDrawing();
+							GFX_ForceFullscreenExit();
+						}
+#endif
+						GFX_CaptureMouse();
+					}
+					SetPriority(sdl.priority.nofocus);
+					GFX_LosingFocus();
+					CPU_Enable_SkipAutoAdjust();
+				}
+			}
+
+			/* Non-focus priority is set to pause; check to see if we've lost window or input focus
+			 * i.e. has the window been minimised or made inactive?
+			 */
+			if (sdl.priority.nofocus == PRIORITY_LEVEL_PAUSE) {
+				if ((event.active.state & (SDL_APPINPUTFOCUS | SDL_APPACTIVE)) && (!event.active.gain)) {
+					/* Window has lost focus, pause the emulator.
+					 * This is similar to what PauseDOSBox() does, but the exit criteria is different.
+					 * Instead of waiting for the user to hit Alt-Break, we wait for the window to
+					 * regain window or input focus.
+					 */
+					bool paused = true;
+					SDL_Event ev;
+
+					GFX_SetTitle(-1,-1,true);
+					KEYBOARD_ClrBuffer();
+//					SDL_Delay(500);
+//					while (SDL_PollEvent(&ev)) {
+						// flush event queue.
+//					}
+
+					while (paused) {
+						// WaitEvent waits for an event rather than polling, so CPU usage drops to zero
+						SDL_WaitEvent(&ev);
+
+						switch (ev.type) {
+						case SDL_QUIT: throw(0); break; // a bit redundant at linux at least as the active events gets before the quit event.
+						case SDL_ACTIVEEVENT:     // wait until we get window focus back
+							if (ev.active.state & (SDL_APPINPUTFOCUS | SDL_APPACTIVE)) {
+								// We've got focus back, so unpause and break out of the loop
+								if (ev.active.gain) {
+									paused = false;
+									GFX_SetTitle(-1,-1,false);
+								}
+
+								/* Now poke a "release ALT" command into the keyboard buffer
+								 * we have to do this, otherwise ALT will 'stick' and cause
+								 * problems with the app running in the DOSBox.
+								 */
+								KEYBOARD_AddKey(KBD_leftalt, false);
+								KEYBOARD_AddKey(KBD_rightalt, false);
+							}
+							break;
+						}
+					}
+				}
+			}
+			break;
+		case SDL_MOUSEMOTION:
+			HandleMouseMotion(&event.motion);
+			break;
+		case SDL_MOUSEBUTTONDOWN:
+		case SDL_MOUSEBUTTONUP:
+			HandleMouseButton(&event.button);
+			break;
+		case SDL_VIDEORESIZE:
+//			HandleVideoResize(&event.resize);
+			break;
+		case SDL_QUIT:
+			throw(0);
+			break;
+		case SDL_VIDEOEXPOSE:
+			if (sdl.draw.callback) sdl.draw.callback( GFX_CallBackRedraw );
+			break;
+#ifdef WIN32
+		case SDL_KEYDOWN:
+		case SDL_KEYUP:
+			// ignore event alt+tab
+			if (event.key.keysym.sym==SDLK_LALT) sdl.laltstate = event.key.type;
+			if (event.key.keysym.sym==SDLK_RALT) sdl.raltstate = event.key.type;
+			if (((event.key.keysym.sym==SDLK_TAB)) &&
+				((sdl.laltstate==SDL_KEYDOWN) || (sdl.raltstate==SDL_KEYDOWN))) break;
+#endif
+#if defined (MACOSX)			
+		case SDL_KEYDOWN:
+		case SDL_KEYUP:
+			/* On macs CMD-Q is the default key to close an application */
+			if (event.key.keysym.sym == SDLK_q && (event.key.keysym.mod == KMOD_RMETA || event.key.keysym.mod == KMOD_LMETA) ) {
+				KillSwitch(true);
+				break;
+			} 
+#endif
+		default:
+			void MAPPER_CheckEvent(SDL_Event * event);
+			MAPPER_CheckEvent(&event);
+		}
+	}
+}
+
+#if defined (WIN32)
+static BOOL WINAPI ConsoleEventHandler(DWORD event) {
+	switch (event) {
+	case CTRL_SHUTDOWN_EVENT:
+	case CTRL_LOGOFF_EVENT:
+	case CTRL_CLOSE_EVENT:
+	case CTRL_BREAK_EVENT:
+		raise(SIGTERM);
+		return TRUE;
+	case CTRL_C_EVENT:
+	default: //pass to the next handler
+		return FALSE;
+	}
+}
+#endif
+
+
+/* static variable to show wether there is not a valid stdout.
+ * Fixes some bugs when -noconsole is used in a read only directory */
+static bool no_stdout = false;
+void GFX_ShowMsg(char const* format,...) {
+	char buf[512];
+	va_list msg;
+	va_start(msg,format);
+	vsprintf(buf,format,msg);
+        strcat(buf,"\n");
+	va_end(msg);
+	if(!no_stdout) printf("%s",buf); //Else buf is parsed again.
+}
+
+
+void Config_Add_SDL() {
+	Section_prop * sdl_sec=control->AddSection_prop("sdl",&GUI_StartUp);
+	sdl_sec->AddInitFunction(&MAPPER_StartUp);
+	Prop_bool* Pbool;
+	Prop_string* Pstring;
+	Prop_int* Pint;
+	Prop_multival* Pmulti;
+
+	Pbool = sdl_sec->Add_bool("fullscreen",Property::Changeable::Always,false);
+	Pbool->Set_help("Start dosbox directly in fullscreen. (Press ALT-Enter to go back)");
+     
+	Pbool = sdl_sec->Add_bool("fulldouble",Property::Changeable::Always,false);
+	Pbool->Set_help("Use double buffering in fullscreen. It can reduce screen flickering, but it can also result in a slow DOSBox.");
+
+	Pstring = sdl_sec->Add_string("fullresolution",Property::Changeable::Always,"original");
+	Pstring->Set_help("What resolution to use for fullscreen: original or fixed size (e.g. 1024x768).\n"
+	                  "  Using your monitor's native resolution with aspect=true might give the best results.\n"
+			  "  If you end up with small window on a large screen, try an output different from surface.");
+
+	Pstring = sdl_sec->Add_string("windowresolution",Property::Changeable::Always,"original");
+	Pstring->Set_help("Scale the window to this size IF the output device supports hardware scaling.\n"
+	                  "  (output=surface does not!)");
+
+	const char* outputs[] = {
+		"surface", "overlay",
+#if C_OPENGL
+		"opengl", "openglnb",
+#endif
+#if (HAVE_DDRAW_H) && defined(WIN32)
+		"ddraw",
+#endif
+		0 };
+	Pstring = sdl_sec->Add_string("output",Property::Changeable::Always,"surface");
+	Pstring->Set_help("What video system to use for output.");
+	Pstring->Set_values(outputs);
+
+	Pbool = sdl_sec->Add_bool("autolock",Property::Changeable::Always,true);
+	Pbool->Set_help("Mouse will automatically lock, if you click on the screen. (Press CTRL-F10 to unlock)");
+
+	Pint = sdl_sec->Add_int("sensitivity",Property::Changeable::Always,100);
+	Pint->SetMinMax(1,1000);
+	Pint->Set_help("Mouse sensitivity.");
+
+	Pbool = sdl_sec->Add_bool("waitonerror",Property::Changeable::Always, true);
+	Pbool->Set_help("Wait before closing the console if dosbox has an error.");
+
+	Pmulti = sdl_sec->Add_multi("priority", Property::Changeable::Always, ",");
+	Pmulti->SetValue("higher,normal");
+	Pmulti->Set_help("Priority levels for dosbox. Second entry behind the comma is for when dosbox is not focused/minimized.\n"
+	                 "  pause is only valid for the second entry.");
+
+	const char* actt[] = { "lowest", "lower", "normal", "higher", "highest", "pause", 0};
+	Pstring = Pmulti->GetSection()->Add_string("active",Property::Changeable::Always,"higher");
+	Pstring->Set_values(actt);
+
+	const char* inactt[] = { "lowest", "lower", "normal", "higher", "highest", "pause", 0};
+	Pstring = Pmulti->GetSection()->Add_string("inactive",Property::Changeable::Always,"normal");
+	Pstring->Set_values(inactt);
+
+	Pstring = sdl_sec->Add_path("mapperfile",Property::Changeable::Always,MAPPERFILE);
+	Pstring->Set_help("File used to load/save the key/event mappings from. Resetmapper only works with the defaul value.");
+
+	Pbool = sdl_sec->Add_bool("usescancodes",Property::Changeable::Always,true);
+	Pbool->Set_help("Avoid usage of symkeys, might not work on all operating systems.");
+}
+
+static void show_warning(char const * const message) {
+	bool textonly = true;
+#ifdef WIN32
+	textonly = false;
+	if ( !sdl.inited && SDL_Init(SDL_INIT_VIDEO|SDL_INIT_NOPARACHUTE) < 0 ) textonly = true;
+	sdl.inited = true;
+#endif
+	printf(message);
+	if(textonly) return;
+	if(!sdl.surface) sdl.surface = SDL_SetVideoMode(640,400,0,0);
+	if(!sdl.surface) return;
+#if SDL_BYTEORDER == SDL_BIG_ENDIAN
+	Bit32u rmask = 0xff000000;
+	Bit32u gmask = 0x00ff0000;
+	Bit32u bmask = 0x0000ff00;
+#else
+	Bit32u rmask = 0x000000ff;
+	Bit32u gmask = 0x0000ff00;                    
+	Bit32u bmask = 0x00ff0000;
+#endif
+	SDL_Surface* splash_surf = SDL_CreateRGBSurface(SDL_SWSURFACE, 640, 400, 32, rmask, gmask, bmask, 0);
+	if (!splash_surf) return;
+
+	int x = 120,y = 20;
+	std::string m(message),m2;
+	std::string::size_type a,b,c,d;
+   
+	while(m.size()) { //Max 50 characters. break on space before or on a newline
+		c = m.find('\n');
+		d = m.rfind(' ',50);
+		if(c>d) a=b=d; else a=b=c;
+		if( a != std::string::npos) b++; 
+		m2 = m.substr(0,a); m.erase(0,b);
+		OutputString(x,y,m2.c_str(),0xffffffff,0,splash_surf);
+		y += 20;
+	}
+   
+	SDL_BlitSurface(splash_surf, NULL, sdl.surface, NULL);
+	SDL_Flip(sdl.surface);
+	SDL_Delay(12000);
+}
+   
+static void launcheditor() {
+	std::string path,file;
+	Cross::CreatePlatformConfigDir(path);
+	Cross::GetPlatformConfigName(file);
+	path += file;
+	FILE* f = fopen(path.c_str(),"r");
+	if(!f && !control->PrintConfig(path.c_str())) {
+		printf("tried creating %s. but failed.\n",path.c_str());
+		exit(1);
+	}
+	if(f) fclose(f);
+/*	if(edit.empty()) {
+		printf("no editor specified.\n");
+		exit(1);
+	}*/
+	std::string edit;
+	while(control->cmdline->FindString("-editconf",edit,true)) //Loop until one succeeds
+		execlp(edit.c_str(),edit.c_str(),path.c_str(),(char*) 0);
+	//if you get here the launching failed!
+	printf("can't find editor(s) specified at the command line.\n");
+	exit(1);
+}
+#if C_DEBUG
+extern void DEBUG_ShutDown(Section * /*sec*/);
+#endif
+
+void restart_program(std::vector<std::string> & parameters) {
+	char** newargs = new char* [parameters.size()+1];
+	// parameter 0 is the executable path
+	// contents of the vector follow
+	// last one is NULL
+	for(Bitu i = 0; i < parameters.size(); i++) newargs[i]=(char*)parameters[i].c_str();
+	newargs[parameters.size()] = NULL;
+	SDL_CloseAudio();
+	SDL_Delay(50);
+	SDL_Quit();
+#if C_DEBUG
+	// shutdown curses
+	DEBUG_ShutDown(NULL);
+#endif
+
+	execvp(newargs[0], newargs);
+	free(newargs);
+}
+void Restart(bool pressed) { // mapper handler
+	restart_program(control->startup_params);
+}
+
+static void launchcaptures(std::string const& edit) {
+	std::string path,file;
+	Section* t = control->GetSection("dosbox");
+	if(t) file = t->GetPropValue("captures");
+	if(!t || file == NO_SUCH_PROPERTY) {
+		printf("Config system messed up.\n");
+		exit(1);
+	}
+	Cross::CreatePlatformConfigDir(path);
+	path += file;
+	Cross::CreateDir(path);
+	struct stat cstat;
+	if(stat(path.c_str(),&cstat) || (cstat.st_mode & S_IFDIR) == 0) {
+		printf("%s doesn't exists or isn't a directory.\n",path.c_str());
+		exit(1);
+	}
+/*	if(edit.empty()) {
+		printf("no editor specified.\n");
+		exit(1);
+	}*/
+
+	execlp(edit.c_str(),edit.c_str(),path.c_str(),(char*) 0);
+	//if you get here the launching failed!
+	printf("can't find filemanager %s\n",edit.c_str());
+	exit(1);
+}
+
+static void printconfiglocation() {
+	std::string path,file;
+	Cross::CreatePlatformConfigDir(path);
+	Cross::GetPlatformConfigName(file);
+	path += file;
+     
+	FILE* f = fopen(path.c_str(),"r");
+	if(!f && !control->PrintConfig(path.c_str())) {
+		printf("tried creating %s. but failed",path.c_str());
+		exit(1);
+	}
+	if(f) fclose(f);
+	printf("%s\n",path.c_str());
+	exit(0);
+}
+
+static void eraseconfigfile() {
+	FILE* f = fopen("dosbox.conf","r");
+	if(f) {
+		fclose(f);
+		show_warning("Warning: dosbox.conf exists in current working directory.\nThis will override the configuration file at runtime.\n");
+	}
+	std::string path,file;
+	Cross::GetPlatformConfigDir(path);
+	Cross::GetPlatformConfigName(file);
+	path += file;
+	f = fopen(path.c_str(),"r");
+	if(!f) exit(0);
+	fclose(f);
+	unlink(path.c_str());
+	exit(0);
+}
+
+static void erasemapperfile() {
+	FILE* g = fopen("dosbox.conf","r");
+	if(g) {
+		fclose(g);
+		show_warning("Warning: dosbox.conf exists in current working directory.\nKeymapping might not be properly reset.\n"
+		             "Please reset configuration as well and delete the dosbox.conf.\n");
+	}
+
+	std::string path,file=MAPPERFILE;
+	Cross::GetPlatformConfigDir(path);
+	path += file;
+	FILE* f = fopen(path.c_str(),"r");
+	if(!f) exit(0);
+	fclose(f);
+	unlink(path.c_str());
+	exit(0);
+}
+
+
+//extern void UI_Init(void);
+int main(int argc, char* argv[]) {
+	DEVMODEA mode;
+	EnumDisplaySettings( NULL,  ENUM_CURRENT_SETTINGS, &mode);
+	mode.dmDisplayFrequency = 70;
+	if( ChangeDisplaySettingsA( &mode, CDS_TEST ) == 0 ) 
+		ChangeDisplaySettingsA( &mode, 0 );
+
+	try {
+		CommandLine com_line(argc,argv);
+		Config myconf(&com_line);
+		control=&myconf;
+		/* Init the configuration system and add default values */
+		Config_Add_SDL();
+		DOSBOX_Init();
+
+		std::string editor;
+		if(control->cmdline->FindString("-editconf",editor,false)) launcheditor();
+		if(control->cmdline->FindString("-opencaptures",editor,true)) launchcaptures(editor);
+		if(control->cmdline->FindExist("-eraseconf")) eraseconfigfile();
+		if(control->cmdline->FindExist("-resetconf")) eraseconfigfile();
+		if(control->cmdline->FindExist("-erasemapper")) erasemapperfile();
+		if(control->cmdline->FindExist("-resetmapper")) erasemapperfile();
+		
+		/* Can't disable the console with debugger enabled */
+#if defined(WIN32) && !(C_DEBUG)
+		if (control->cmdline->FindExist("-noconsole")) {
+			FreeConsole();
+			/* Redirect standard input and standard output */
+			if(freopen(STDOUT_FILE, "w", stdout) == NULL)
+				no_stdout = true; // No stdout so don't write messages
+			freopen(STDERR_FILE, "w", stderr);
+			setvbuf(stdout, NULL, _IOLBF, BUFSIZ);	/* Line buffered */
+			setbuf(stderr, NULL);					/* No buffering */
+		} else {
+			if (AllocConsole()) {
+				fclose(stdin);
+				fclose(stdout);
+				fclose(stderr);
+				freopen("CONIN$","r",stdin);
+				freopen("CONOUT$","w",stdout);
+				freopen("CONOUT$","w",stderr);
+			}
+			SetConsoleTitle("DOSBox Status Window");
+		}
+#endif  //defined(WIN32) && !(C_DEBUG)
+		if (control->cmdline->FindExist("-version") ||
+		    control->cmdline->FindExist("--version") ) {
+			printf("\nDOSBox version %s, copyright 2002-2011 DOSBox Team.\n\n",VERSION);
+			printf("DOSBox is written by the DOSBox Team (See AUTHORS file))\n");
+			printf("DOSBox comes with ABSOLUTELY NO WARRANTY.  This is free software,\n");
+			printf("and you are welcome to redistribute it under certain conditions;\n");
+			printf("please read the COPYING file thoroughly before doing so.\n\n");
+			return 0;
+		}
+		if(control->cmdline->FindExist("-printconf")) printconfiglocation();
+
+#if C_DEBUG
+		DEBUG_SetupConsole();
+#endif
+
+#if defined(WIN32)
+	SetConsoleCtrlHandler((PHANDLER_ROUTINE) ConsoleEventHandler,TRUE);
+#endif
+
+#ifdef OS2
+        PPIB pib;
+        PTIB tib;
+        DosGetInfoBlocks(&tib, &pib);
+        if (pib->pib_ultype == 2) pib->pib_ultype = 3;
+        setbuf(stdout, NULL);
+        setbuf(stderr, NULL);
+#endif
+
+	/* Display Welcometext in the console */
+	LOG_MSG("DOSBox version %s",VERSION);
+	LOG_MSG("Copyright 2002-2011 DOSBox Team, published under GNU GPL.");
+	LOG_MSG("---");
+
+	/* Init SDL */
+#if SDL_VERSION_ATLEAST(1, 2, 14)
+	/* Or debian/ubuntu with older libsdl version as they have done this themselves, but then differently.
+	 * with this variable they will work correctly. I've only tested the 1.2.14 behaviour against the windows version
+	 * of libsdl
+	 */
+	putenv(const_cast<char*>("SDL_DISABLE_LOCK_KEYS=1"));
+#endif
+	if ( SDL_Init( SDL_INIT_AUDIO|SDL_INIT_VIDEO|SDL_INIT_TIMER|SDL_INIT_CDROM
+		|SDL_INIT_NOPARACHUTE
+		) < 0 ) E_Exit("Can't init SDL %s",SDL_GetError());
+	sdl.inited = true;
+
+#ifndef DISABLE_JOYSTICK
+	//Initialise Joystick seperately. This way we can warn when it fails instead
+	//of exiting the application
+	if( SDL_InitSubSystem(SDL_INIT_JOYSTICK) < 0 ) LOG_MSG("Failed to init joystick support");
+#endif
+
+	sdl.laltstate = SDL_KEYUP;
+	sdl.raltstate = SDL_KEYUP;
+
+#if defined (WIN32)
+#if SDL_VERSION_ATLEAST(1, 2, 10)
+		sdl.using_windib=true;
+#else
+		sdl.using_windib=false;
+#endif
+		char sdl_drv_name[128];
+		if (getenv("SDL_VIDEODRIVER")==NULL) {
+			if (SDL_VideoDriverName(sdl_drv_name,128)!=NULL) {
+				sdl.using_windib=false;
+				if (strcmp(sdl_drv_name,"directx")!=0) {
+					SDL_QuitSubSystem(SDL_INIT_VIDEO);
+					putenv("SDL_VIDEODRIVER=directx");
+					if (SDL_InitSubSystem(SDL_INIT_VIDEO)<0) {
+						putenv("SDL_VIDEODRIVER=windib");
+						if (SDL_InitSubSystem(SDL_INIT_VIDEO)<0) E_Exit("Can't init SDL Video %s",SDL_GetError());
+						sdl.using_windib=true;
+					}
+				}
+			}
+		} else {
+			char* sdl_videodrv = getenv("SDL_VIDEODRIVER");
+			if (strcmp(sdl_videodrv,"directx")==0) sdl.using_windib = false;
+			else if (strcmp(sdl_videodrv,"windib")==0) sdl.using_windib = true;
+		}
+		if (SDL_VideoDriverName(sdl_drv_name,128)!=NULL) {
+			if (strcmp(sdl_drv_name,"windib")==0) LOG_MSG("SDL_Init: Starting up with SDL windib video driver.\n          Try to update your video card and directx drivers!");
+		}
+#endif
+	sdl.num_joysticks=SDL_NumJoysticks();
+
+	/* Parse configuration files */
+	std::string config_file,config_path;
+	Cross::GetPlatformConfigDir(config_path);
+	
+	//First parse -userconf
+	if(control->cmdline->FindExist("-userconf",true)){
+		config_file.clear();
+		Cross::GetPlatformConfigDir(config_path);
+		Cross::GetPlatformConfigName(config_file);
+		config_path += config_file;
+		control->ParseConfigFile(config_path.c_str());
+		if(!control->configfiles.size()) {
+			//Try to create the userlevel configfile.
+			config_file.clear();
+			Cross::CreatePlatformConfigDir(config_path);
+			Cross::GetPlatformConfigName(config_file);
+			config_path += config_file;
+			if(control->PrintConfig(config_path.c_str())) {
+				LOG_MSG("CONFIG: Generating default configuration.\nWriting it to %s",config_path.c_str());
+				//Load them as well. Makes relative paths much easier
+				control->ParseConfigFile(config_path.c_str());
+			}
+		}
+	}
+
+	//Second parse -conf switches
+	while(control->cmdline->FindString("-conf",config_file,true)) {
+		if(!control->ParseConfigFile(config_file.c_str())) {
+			// try to load it from the user directory
+			control->ParseConfigFile((config_path + config_file).c_str());
+		}
+	}
+	// if none found => parse localdir conf
+	if(!control->configfiles.size()) control->ParseConfigFile("dosbox.conf");
+
+	// if none found => parse userlevel conf
+	if(!control->configfiles.size()) {
+		config_file.clear();
+		Cross::GetPlatformConfigName(config_file);
+		control->ParseConfigFile((config_path + config_file).c_str());
+	}
+
+	if(!control->configfiles.size()) {
+		//Try to create the userlevel configfile.
+		config_file.clear();
+		Cross::CreatePlatformConfigDir(config_path);
+		Cross::GetPlatformConfigName(config_file);
+		config_path += config_file;
+		if(control->PrintConfig(config_path.c_str())) {
+			LOG_MSG("CONFIG: Generating default configuration.\nWriting it to %s",config_path.c_str());
+			//Load them as well. Makes relative paths much easier
+			control->ParseConfigFile(config_path.c_str());
+		} else {
+			LOG_MSG("CONFIG: Using default settings. Create a configfile to change them");
+		}
+	}
+
+
+#if (ENVIRON_LINKED)
+		control->ParseEnv(environ);
+#endif
+//		UI_Init();
+//		if (control->cmdline->FindExist("-startui")) UI_Run(false);
+		/* Init all the sections */
+		control->Init();
+		/* Some extra SDL Functions */
+		Section_prop * sdl_sec=static_cast<Section_prop *>(control->GetSection("sdl"));
+
+		if (control->cmdline->FindExist("-fullscreen") || sdl_sec->Get_bool("fullscreen")) {
+			if(!sdl.desktop.fullscreen) { //only switch if not already in fullscreen
+				GFX_SwitchFullScreen();
+			}
+		}
+
+		/* Init the keyMapper */
+		MAPPER_Init();
+		if (control->cmdline->FindExist("-startmapper")) MAPPER_RunInternal();
+		/* Start up main machine */
+		control->StartUp();
+		/* Shutdown everything */
+	} catch (char * error) {
+#if defined (WIN32)
+		sticky_keys(true);
+#endif
+		GFX_ShowMsg("Exit to error: %s",error);
+		fflush(NULL);
+		if(sdl.wait_on_error) {
+			//TODO Maybe look for some way to show message in linux?
+#if (C_DEBUG)
+			GFX_ShowMsg("Press enter to continue");
+			fflush(NULL);
+			fgetc(stdin);
+#elif defined(WIN32)
+			Sleep(5000);
+#endif
+		}
+
+	}
+	catch (int){
+		;//nothing pressed killswitch
+	}
+	catch(...){
+#if defined (WIN32)
+		sticky_keys(true);
+#endif
+		//Force visible mouse to end user. Somehow this sometimes doesn't happen
+		SDL_WM_GrabInput(SDL_GRAB_OFF);
+		SDL_ShowCursor(SDL_ENABLE);
+		throw;//dunno what happened. rethrow for sdl to catch
+	}
+#if defined (WIN32)
+	sticky_keys(true); //Might not be needed if the shutdown function switches to windowed mode, but it doesn't hurt
+#endif 
+	//Force visible mouse to end user. Somehow this sometimes doesn't happen
+	SDL_WM_GrabInput(SDL_GRAB_OFF);
+	SDL_ShowCursor(SDL_ENABLE);
+
+	SDL_Quit();//Let's hope sdl will quit as well when it catches an exception
+	return 0;
+}
+
+void GFX_GetSize(int &width, int &height, bool &fullscreen) {
+	width = sdl.draw.width;
+	height = sdl.draw.height;
+	fullscreen = sdl.desktop.fullscreen;
+}
