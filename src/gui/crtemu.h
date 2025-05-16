@@ -23,7 +23,7 @@ before you include this file in *one* C/C++ file to create the implementation.
 
 typedef struct crtemu_t crtemu_t;
 
-crtemu_t* crtemu_create( void* memctx );
+crtemu_t* crtemu_create( void* memctx , int mode);
 
 void crtemu_destroy( crtemu_t* crtemu );
 
@@ -154,6 +154,8 @@ struct crtemu_t
 
 	CRTEMU_GLuint vertexbuffer;
     CRTEMU_GLuint backbuffer; 
+
+    CRTEMU_GLuint shadermode;
 
 	CRTEMU_GLuint accumulatetexture_a; 
 	CRTEMU_GLuint accumulatetexture_b; 
@@ -315,12 +317,13 @@ static CRTEMU_GLuint crtemu_internal_build_shader( crtemu_t* crtemu, char const*
     }
 
 
-crtemu_t* crtemu_create( void* memctx )
+crtemu_t* crtemu_create( void* memctx , int shadermode)
     {
     crtemu_t* crtemu = (crtemu_t*) CRTEMU_MALLOC( memctx, sizeof( crtemu_t ) );
     memset( crtemu, 0, sizeof( crtemu_t ) );
     crtemu->memctx = memctx;
 
+    crtemu->shadermode = shadermode;
     crtemu->use_frame = 0.0f;
 	
     crtemu->last_present_width = 0;
@@ -673,7 +676,440 @@ crtemu_t* crtemu_create( void* memctx )
 			
 	 ) /* STR */;
 
-	crtemu->crt_shader = crtemu_internal_build_shader( crtemu, vs_source, crt_fs_source );
+            //ALERT - new crt shader without crt
+
+            //--------------------------------------------------------------------------------
+
+            char const* crt_fs_source2 =
+                STR(
+                    #version 330\n\n
+
+                    in vec2 uv;
+            out vec4 color;
+
+            uniform vec3 modulate;
+            uniform vec2 resolution;
+            uniform float time;
+            uniform sampler2D backbuffer;
+            uniform sampler2D blurbuffer;
+            uniform sampler2D frametexture;
+            uniform float use_frame;
+
+            vec3 tsample(sampler2D samp, vec2 tc, float offs, vec2 resolution)
+            {
+                tc = tc * vec2(1.035, 0.96) + vec2(-0.0125 * 0.75, 0.02);
+                tc = tc * 1.2 - 0.1;
+                vec3 s = pow(abs(texture2D(samp, vec2(tc.x, 1.0 - tc.y)).bgr), vec3(2.2));
+                return s * vec3(1.25);
+            }
+
+            vec3 filmic(vec3 LinearColor)
+            {
+                vec3 x = max(vec3(0.0), LinearColor - vec3(0.004));
+                return (x * (6.2 * x + 0.5)) / (x * (6.2 * x + 1.7) + 0.12);
+            }
+
+            vec2 curve(vec2 uv)
+            {
+                uv = (uv - 0.5) * 2.0;
+                uv *= 1.1;
+                uv.x *= 1.0 + pow((abs(uv.y) / 5.0), 2.0);
+                uv.y *= 1.0 + pow((abs(uv.x) / 4.0), 2.0);
+                uv = (uv / 2.0) + 0.5;
+                uv = uv * 0.92 + 0.04;
+                return uv;
+            }
+
+            float rand(vec2 co)
+            {
+                return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453);
+            }
+
+                ) STR /* neeed to break up the string because of string limit on older compilers */(
+
+                    void main(void)
+            {
+                /* Curve */
+                //vec2 curved_uv = mix(curve(uv), uv, 0.8);
+                vec2 curved_uv = mix(curve(uv), uv, 1.0);
+                float scale = 0.04;
+                vec2 scuv = curved_uv * (1.0 - scale) + scale / 2.0 + vec2(0.003, -0.001);
+
+                /* Main color, Bleed */
+                vec3 col;
+                float x = sin(0.1 * time + curved_uv.y * 13.0) * sin(0.23 * time + curved_uv.y * 19.0) * sin(0.3 + 0.11 * time + curved_uv.y * 23.0) * 0.0012;
+                float o = sin(gl_FragCoord.y * 1.5) / resolution.x;
+                x += o * 0.25;
+                x *= 0.2f;
+                col.r = tsample(backbuffer, vec2(x + scuv.x + 0.0009 * 0.25, scuv.y + 0.0009 * 0.25), resolution.y / 800.0, resolution).x + 0.02;
+                col.g = tsample(backbuffer, vec2(x + scuv.x + 0.0000 * 0.25, scuv.y - 0.0011 * 0.25), resolution.y / 800.0, resolution).y + 0.02;
+                col.b = tsample(backbuffer, vec2(x + scuv.x - 0.0015 * 0.25, scuv.y + 0.0000 * 0.25), resolution.y / 800.0, resolution).z + 0.02;
+            //    float i = clamp(col.r * 0.299 + col.g * 0.587 + col.b * 0.114, 0.0, 1.0);
+                float i = clamp(col.r + col.g + col.b, 0.0, 1.0);
+                i = pow(1.0 - pow(i, 2.0), 1.0);
+                i = (1.0 - i) * 0.85 + 0.15;
+
+                /* Ghosting */
+                /*float ghs = 0.05;
+                vec3 r = tsample(blurbuffer, vec2(x - 0.014 * 1.0, -0.027) * 0.45 + 0.007 * vec2(0.35 * sin(1.0 / 7.0 + 15.0 * curved_uv.y + 0.9 * time),
+                    0.35 * sin(2.0 / 7.0 + 10.0 * curved_uv.y + 1.37 * time)) + vec2(scuv.x + 0.001, scuv.y + 0.001),
+                    5.5 + 1.3 * sin(3.0 / 9.0 + 31.0 * curved_uv.x + 1.70 * time), resolution).xyz * vec3(0.5, 0.25, 0.25);
+                vec3 g = tsample(blurbuffer, vec2(x - 0.019 * 1.0, -0.020) * 0.45 + 0.007 * vec2(0.35 * cos(1.0 / 9.0 + 15.0 * curved_uv.y + 0.5 * time),
+                    0.35 * sin(2.0 / 9.0 + 10.0 * curved_uv.y + 1.50 * time)) + vec2(scuv.x + 0.000, scuv.y - 0.002),
+                    5.4 + 1.3 * sin(3.0 / 3.0 + 71.0 * curved_uv.x + 1.90 * time), resolution).xyz * vec3(0.25, 0.5, 0.25);
+                vec3 b = tsample(blurbuffer, vec2(x - 0.017 * 1.0, -0.003) * 0.35 + 0.007 * vec2(0.35 * sin(2.0 / 3.0 + 15.0 * curved_uv.y + 0.7 * time),
+                    0.35 * cos(2.0 / 3.0 + 10.0 * curved_uv.y + 1.63 * time)) + vec2(scuv.x - 0.002, scuv.y + 0.000),
+                    5.3 + 1.3 * sin(3.0 / 7.0 + 91.0 * curved_uv.x + 1.65 * time), resolution).xyz * vec3(0.25, 0.25, 0.5);
+                    ) STR (
+
+                        col += vec3(ghs * (1.0 - 0.299)) * pow(clamp(vec3(3.0) * r, vec3(0.0), vec3(1.0)), vec3(2.0)) * vec3(i);
+                col += vec3(ghs * (1.0 - 0.587)) * pow(clamp(vec3(3.0) * g, vec3(0.0), vec3(1.0)), vec3(2.0)) * vec3(i);
+                col += vec3(ghs * (1.0 - 0.114)) * pow(clamp(vec3(3.0) * b, vec3(0.0), vec3(1.0)), vec3(2.0)) * vec3(i);*/
+
+                /* Level adjustment (curves) */
+                /*col *= vec3(0.95, 1.05, 0.95);
+                col = clamp(col * 1.3 + 0.75 * col * col + 1.25 * col * col * col * col * col, vec3(0.0), vec3(10.0));*/
+
+                /* Vignette */
+                /*float vig = (0.1 + 1.0 * 16.0 * curved_uv.x * curved_uv.y * (1.0 - curved_uv.x) * (1.0 - curved_uv.y));
+                vig = 1.3 * pow(vig, 0.5);
+                col *= vig;*/
+
+                /* Scanlines */
+                /*float scans = clamp(0.35 + 0.18 * sin(0.0 * time + curved_uv.y * resolution.y * 1.5), 0.0, 1.0);
+                float s = pow(scans, 0.9);
+                col = col * vec3(s);*/
+
+                /* Vertical lines (shadow mask) */
+              //  col *= 1.0 - 0.23 * (clamp((mod(gl_FragCoord.xy.x, 3.0)) / 2.0, 0.0, 1.0));
+
+                /* Tone map */
+                col = filmic(col);
+
+                    ) STR /* neeed to break up the string because of string limit on older compilers */(
+
+                        /* Noise */
+                        //vec2 seed = floor(curved_uv*resolution.xy*vec2(0.5))/resolution.xy;
+                        //vec2 seed = curved_uv * resolution.xy;;
+                /* seed = curved_uv; */
+                //col -= 0.015 * pow(vec3(rand(seed + time), rand(seed + time * 2.0), rand(seed + time * 3.0)), vec3(1.5));
+
+                /* Flicker */
+                //col *= (1.0 - 0.004 * (sin(50.0 * time + curved_uv.y * 2.0) * 0.5 + 0.5));
+
+                /* Clamp */
+                if (curved_uv.x < 0.0 || curved_uv.x > 1.0)
+                    col *= 0.0;
+                if (curved_uv.y < 0.0 || curved_uv.y > 1.0)
+                    col *= 0.0;
+
+                /* Frame */
+                vec2 fscale = vec2(-0.019, -0.018);
+                vec2 fuv = vec2(uv.x, 1.0 - uv.y) * ((1.0) + 2.0 * fscale) - fscale - vec2(-0.0, 0.005);
+                vec4 f = texture2D(frametexture, fuv * vec2(0.91, 0.8) + vec2(0.050, 0.093));
+                f.xyz = mix(f.xyz, vec3(0.5, 0.5, 0.5), 0.5);
+                float fvig = clamp(-0.00 + 512.0 * uv.x * uv.y * (1.0 - uv.x) * (1.0 - uv.y), 0.2, 0.85);
+                col *= fvig;
+                col = mix(col, mix(max(col, 0.0), pow(abs(f.xyz), vec3(1.4)), f.w), vec3(use_frame));
+
+                color = vec4(col, 1.0);
+            }
+
+                    ) /* STR */;
+
+            //--------------------------------------------------------------------------------
+
+                char const* crt_fs_source3 =
+                    STR(
+                        #version 330\n\n
+
+                        in vec2 uv;
+                out vec4 color;
+
+                uniform vec3 modulate;
+                uniform vec2 resolution;
+                uniform float time;
+                uniform sampler2D backbuffer;
+                uniform sampler2D blurbuffer;
+                uniform sampler2D frametexture;
+                uniform float use_frame;
+
+                vec3 tsample(sampler2D samp, vec2 tc, float offs, vec2 resolution)
+                {
+                    tc = tc * vec2(1.035, 0.96) + vec2(-0.0125 * 0.75, 0.02);
+                    tc = tc * 1.2 - 0.1;
+                    vec3 s = pow(abs(texture2D(samp, vec2(tc.x, 1.0 - tc.y)).bgr), vec3(2.2));
+                    return s * vec3(1.25);
+                }
+
+                vec3 filmic(vec3 LinearColor)
+                {
+                    vec3 x = max(vec3(0.0), LinearColor - vec3(0.004));
+                    return (x * (6.2 * x + 0.5)) / (x * (6.2 * x + 1.7) + 0.12);
+                }
+
+                vec2 curve(vec2 uv)
+                {
+                    uv = (uv - 0.5) * 2.0;
+                    uv *= 1.1;
+                    uv.x *= 1.0 + pow((abs(uv.y) / 5.0), 2.0);
+                    uv.y *= 1.0 + pow((abs(uv.x) / 4.0), 2.0);
+                    uv = (uv / 2.0) + 0.5;
+                    uv = uv * 0.92 + 0.04;
+                    return uv;
+                }
+
+                float rand(vec2 co)
+                {
+                    return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453);
+                }
+
+                    ) STR /* neeed to break up the string because of string limit on older compilers */(
+
+                        void main(void)
+                {
+                    /* Curve */
+                    //vec2 curved_uv = mix(curve(uv), uv, 0.8);
+                    vec2 curved_uv = mix(curve(uv), uv, 1.0);
+                    float scale = 0.04;
+                    vec2 scuv = curved_uv * (1.0 - scale) + scale / 2.0 + vec2(0.003, -0.001);
+
+                    /* Main color, Bleed */
+                    vec3 col;
+                    float x = sin(0.1 * time + curved_uv.y * 13.0) * sin(0.23 * time + curved_uv.y * 19.0) * sin(0.3 + 0.11 * time + curved_uv.y * 23.0) * 0.0012;
+                    float o = sin(gl_FragCoord.y * 1.5) / resolution.x;
+                    x += o * 0.25;
+                    x *= 0.2f;
+                    col.r = tsample(backbuffer, vec2(x + scuv.x + 0.0009 * 0.25, scuv.y + 0.0009 * 0.25), resolution.y / 800.0, resolution).x + 0.02;
+                    col.g = tsample(backbuffer, vec2(x + scuv.x + 0.0000 * 0.25, scuv.y - 0.0011 * 0.25), resolution.y / 800.0, resolution).y + 0.02;
+                    col.b = tsample(backbuffer, vec2(x + scuv.x - 0.0015 * 0.25, scuv.y + 0.0000 * 0.25), resolution.y / 800.0, resolution).z + 0.02;
+                    //    float i = clamp(col.r * 0.299 + col.g * 0.587 + col.b * 0.114, 0.0, 1.0);
+                    float i = clamp(col.r + col.g + col.b, 0.0, 1.0);
+                    i = pow(1.0 - pow(i, 2.0), 1.0);
+                    i = (1.0 - i) * 0.85 + 0.15;
+
+                    /* Ghosting */
+                    /*float ghs = 0.05;
+                    vec3 r = tsample(blurbuffer, vec2(x - 0.014 * 1.0, -0.027) * 0.45 + 0.007 * vec2(0.35 * sin(1.0 / 7.0 + 15.0 * curved_uv.y + 0.9 * time),
+                        0.35 * sin(2.0 / 7.0 + 10.0 * curved_uv.y + 1.37 * time)) + vec2(scuv.x + 0.001, scuv.y + 0.001),
+                        5.5 + 1.3 * sin(3.0 / 9.0 + 31.0 * curved_uv.x + 1.70 * time), resolution).xyz * vec3(0.5, 0.25, 0.25);
+                    vec3 g = tsample(blurbuffer, vec2(x - 0.019 * 1.0, -0.020) * 0.45 + 0.007 * vec2(0.35 * cos(1.0 / 9.0 + 15.0 * curved_uv.y + 0.5 * time),
+                        0.35 * sin(2.0 / 9.0 + 10.0 * curved_uv.y + 1.50 * time)) + vec2(scuv.x + 0.000, scuv.y - 0.002),
+                        5.4 + 1.3 * sin(3.0 / 3.0 + 71.0 * curved_uv.x + 1.90 * time), resolution).xyz * vec3(0.25, 0.5, 0.25);
+                    vec3 b = tsample(blurbuffer, vec2(x - 0.017 * 1.0, -0.003) * 0.35 + 0.007 * vec2(0.35 * sin(2.0 / 3.0 + 15.0 * curved_uv.y + 0.7 * time),
+                        0.35 * cos(2.0 / 3.0 + 10.0 * curved_uv.y + 1.63 * time)) + vec2(scuv.x - 0.002, scuv.y + 0.000),
+                        5.3 + 1.3 * sin(3.0 / 7.0 + 91.0 * curved_uv.x + 1.65 * time), resolution).xyz * vec3(0.25, 0.25, 0.5);
+                        ) STR (
+
+                            col += vec3(ghs * (1.0 - 0.299)) * pow(clamp(vec3(3.0) * r, vec3(0.0), vec3(1.0)), vec3(2.0)) * vec3(i);
+                    col += vec3(ghs * (1.0 - 0.587)) * pow(clamp(vec3(3.0) * g, vec3(0.0), vec3(1.0)), vec3(2.0)) * vec3(i);
+                    col += vec3(ghs * (1.0 - 0.114)) * pow(clamp(vec3(3.0) * b, vec3(0.0), vec3(1.0)), vec3(2.0)) * vec3(i);*/
+
+                    /* Level adjustment (curves) */
+                    /*col *= vec3(0.95, 1.05, 0.95);
+                    col = clamp(col * 1.3 + 0.75 * col * col + 1.25 * col * col * col * col * col, vec3(0.0), vec3(10.0));*/
+
+                    /* Vignette */
+                    /*float vig = (0.1 + 1.0 * 16.0 * curved_uv.x * curved_uv.y * (1.0 - curved_uv.x) * (1.0 - curved_uv.y));
+                    vig = 1.3 * pow(vig, 0.5);
+                    col *= vig;*/
+
+                    /* Scanlines */
+                    /*float scans = clamp(0.35 + 0.18 * sin(0.0 * time + curved_uv.y * resolution.y * 1.5), 0.0, 1.0);
+                    float s = pow(scans, 0.9);
+                    col = col * vec3(s);*/
+
+                    /* Vertical lines (shadow mask) */
+                  //  col *= 1.0 - 0.23 * (clamp((mod(gl_FragCoord.xy.x, 3.0)) / 2.0, 0.0, 1.0));
+
+                    /* Tone map */
+                    col = filmic(col);
+
+                        ) STR /* neeed to break up the string because of string limit on older compilers */(
+
+                            /* Noise */
+                            //vec2 seed = floor(curved_uv*resolution.xy*vec2(0.5))/resolution.xy;
+                            //vec2 seed = curved_uv * resolution.xy;;
+                    /* seed = curved_uv; */
+                    //col -= 0.015 * pow(vec3(rand(seed + time), rand(seed + time * 2.0), rand(seed + time * 3.0)), vec3(1.5));
+
+                    /* Flicker */
+                    //col *= (1.0 - 0.004 * (sin(50.0 * time + curved_uv.y * 2.0) * 0.5 + 0.5));
+
+                    /* Clamp */
+                            if (curved_uv.x < 0.0 || curved_uv.x > 1.0)
+                                col *= 0.0;
+                    if (curved_uv.y < 0.0 || curved_uv.y > 1.0)
+                        col *= 0.0;
+
+                    /* Frame */
+                   // vec2 fscale = vec2(-0.019, -0.018);
+                    vec2 fscale = vec2(-0.0, -0.0);
+                    vec2 fuv = vec2(uv.x, 1.0 - uv.y) * ((1.0) + 2.0 * fscale) - fscale - vec2(-0.0, 0.005);
+                    vec4 f = texture2D(frametexture, fuv * vec2(0.91, 0.8) + vec2(0.050, 0.093));
+                    f.xyz = mix(f.xyz, vec3(0.5, 0.5, 0.5), 0.5);
+                    float fvig = clamp(-0.00 + 512.0 * uv.x * uv.y * (1.0 - uv.x) * (1.0 - uv.y), 0.2, 0.85);
+                    col *= fvig;
+                    col = mix(col, mix(max(col, 0.0), pow(abs(f.xyz), vec3(1.4)), f.w), vec3(use_frame));
+
+                    color = vec4(col, 1.0);
+                }
+
+                        ) /* STR */;
+
+            //--------------------------------------------------------------------------------
+
+                    char const* crt_fs_source4 =
+                        STR(
+                            #version 330\n\n
+
+                            in vec2 uv;
+                    out vec4 color;
+
+                    uniform vec3 modulate;
+                    uniform vec2 resolution;
+                    uniform float time;
+                    uniform sampler2D backbuffer;
+                    uniform sampler2D blurbuffer;
+                    uniform sampler2D frametexture;
+                    uniform float use_frame;
+
+                    vec3 tsample(sampler2D samp, vec2 tc, float offs, vec2 resolution)
+                    {
+                        tc = tc * vec2(1.035, 0.96) + vec2(-0.0125 * 0.75, 0.02);
+                        tc = tc * 1.2 - 0.1;
+                        vec3 s = pow(abs(texture2D(samp, vec2(tc.x, 1.0 - tc.y)).bgr), vec3(2.2));
+                        return s * vec3(1.25);
+                    }
+
+                    vec3 filmic(vec3 LinearColor)
+                    {
+                        vec3 x = max(vec3(0.0), LinearColor - vec3(0.004));
+                        return (x * (6.2 * x + 0.5)) / (x * (6.2 * x + 1.7) + 0.06);
+                    }
+
+                    vec2 curve(vec2 uv)
+                    {
+                        uv = (uv - 0.5) * 2.0;
+                        uv *= 1.1;
+                        uv.x *= 1.0 + pow((abs(uv.y) / 5.0), 2.0);
+                        uv.y *= 1.0 + pow((abs(uv.x) / 4.0), 2.0);
+                        uv = (uv / 2.0) + 0.5;
+                        uv = uv * 0.92 + 0.04;
+                        return uv;
+                    }
+
+                    float rand(vec2 co)
+                    {
+                        return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453);
+                    }
+
+                        ) STR /* neeed to break up the string because of string limit on older compilers */(
+
+                            void main(void)
+                    {
+                        /* Curve */
+                        vec2 curved_uv = mix(curve(uv), uv, 0.8);
+                        float scale = 0.04;
+                        vec2 scuv = curved_uv * (1.0 - scale) + scale / 2.0 + vec2(0.003, -0.001);
+
+                        /* Main color, Bleed */
+                        vec3 col;
+                        float x = sin(0.1 * time + curved_uv.y * 13.0) * sin(0.23 * time + curved_uv.y * 19.0) * sin(0.3 + 0.11 * time + curved_uv.y * 23.0) * 0.0012;
+                        float o = sin(gl_FragCoord.y * 1.5) / resolution.x;
+                        x += o * 0.25;
+                        x *= 0.2f;
+                        col.r = tsample(backbuffer, vec2(x + scuv.x + 0.0009 * 0.25, scuv.y + 0.0009 * 0.25), resolution.y / 800.0, resolution).x + 0.02;
+                        col.g = tsample(backbuffer, vec2(x + scuv.x + 0.0000 * 0.25, scuv.y - 0.0011 * 0.25), resolution.y / 800.0, resolution).y + 0.02;
+                        col.b = tsample(backbuffer, vec2(x + scuv.x - 0.0015 * 0.25, scuv.y + 0.0000 * 0.25), resolution.y / 800.0, resolution).z + 0.02;
+                        float i = clamp(col.r * 0.299 + col.g * 0.587 + col.b * 0.114, 0.0, 1.0);
+                        i = pow(1.0 - pow(i, 2.0), 1.0);
+                        i = (1.0 - i) * 0.85 + 0.15;
+
+                        /* Ghosting */
+                        float ghs = 0.05;
+                        vec3 r = tsample(blurbuffer, vec2(x - 0.014 * 1.0, -0.027) * 0.45 + 0.007 * vec2(0.35 * sin(1.0 / 7.0 + 15.0 * curved_uv.y + 0.9 * time),
+                            0.35 * sin(2.0 / 7.0 + 10.0 * curved_uv.y + 1.37 * time)) + vec2(scuv.x + 0.001, scuv.y + 0.001),
+                            5.5 + 1.3 * sin(3.0 / 9.0 + 31.0 * curved_uv.x + 1.70 * time), resolution).xyz * vec3(0.5, 0.25, 0.25);
+                        vec3 g = tsample(blurbuffer, vec2(x - 0.019 * 1.0, -0.020) * 0.45 + 0.007 * vec2(0.35 * cos(1.0 / 9.0 + 15.0 * curved_uv.y + 0.5 * time),
+                            0.35 * sin(2.0 / 9.0 + 10.0 * curved_uv.y + 1.50 * time)) + vec2(scuv.x + 0.000, scuv.y - 0.002),
+                            5.4 + 1.3 * sin(3.0 / 3.0 + 71.0 * curved_uv.x + 1.90 * time), resolution).xyz * vec3(0.25, 0.5, 0.25);
+                        vec3 b = tsample(blurbuffer, vec2(x - 0.017 * 1.0, -0.003) * 0.35 + 0.007 * vec2(0.35 * sin(2.0 / 3.0 + 15.0 * curved_uv.y + 0.7 * time),
+                            0.35 * cos(2.0 / 3.0 + 10.0 * curved_uv.y + 1.63 * time)) + vec2(scuv.x - 0.002, scuv.y + 0.000),
+                            5.3 + 1.3 * sin(3.0 / 7.0 + 91.0 * curved_uv.x + 1.65 * time), resolution).xyz * vec3(0.25, 0.25, 0.5);
+                            ) STR /* neeed to break up the string because of string limit on older compilers */(
+
+                                col += vec3(ghs * (1.0 - 0.299)) * pow(clamp(vec3(3.0) * r, vec3(0.0), vec3(1.0)), vec3(2.0)) * vec3(i);
+                        col += vec3(ghs * (1.0 - 0.587)) * pow(clamp(vec3(3.0) * g, vec3(0.0), vec3(1.0)), vec3(2.0)) * vec3(i);
+                        col += vec3(ghs * (1.0 - 0.114)) * pow(clamp(vec3(3.0) * b, vec3(0.0), vec3(1.0)), vec3(2.0)) * vec3(i);
+
+                        /* Level adjustment (curves) */
+                        col *= vec3(0.95, 1.05, 0.95);
+                        col = clamp(col * 1.3 + 0.75 * col * col + 1.25 * col * col * col * col * col, vec3(0.0), vec3(10.0));
+
+                        /* Vignette */
+                        float vig = (0.1 + 1.0 * 16.0 * curved_uv.x * curved_uv.y * (1.0 - curved_uv.x) * (1.0 - curved_uv.y));
+                        vig = 1.3 * pow(vig, 0.5);
+                        col *= vig;
+
+                        /* Scanlines */
+                        float scans = clamp(0.35 + 0.18 * sin(0.0 * time + curved_uv.y * resolution.y * 1.5), 0.0, 1.0);
+                        float s = pow(scans, 0.9);
+                        col = col * vec3(s);
+
+                        /* Vertical lines (shadow mask) */
+                        col *= 1.0 - 0.23 * (clamp((mod(gl_FragCoord.xy.x, 3.0)) / 2.0, 0.0, 1.0));
+
+                        /* Tone map */
+                        col = filmic(col);
+
+                            ) STR /* neeed to break up the string because of string limit on older compilers */(
+
+                                /* Noise */
+                                //vec2 seed = floor(curved_uv*resolution.xy*vec2(0.5))/resolution.xy;
+                                vec2 seed = curved_uv * resolution.xy;;
+                        /* seed = curved_uv; */
+                        col -= 0.015 * pow(vec3(rand(seed + time), rand(seed + time * 2.0), rand(seed + time * 3.0)), vec3(1.5));
+
+                        /* Flicker */
+                        col *= (1.0 - 0.004 * (sin(50.0 * time + curved_uv.y * 2.0) * 0.5 + 0.5));
+
+                        /* Clamp */
+                        if (curved_uv.x < 0.0 || curved_uv.x > 1.0)
+                            col *= 0.0;
+                        if (curved_uv.y < 0.0 || curved_uv.y > 1.0)
+                            col *= 0.0;
+
+                        /* Frame */
+                        vec2 fscale = vec2(-0.0, -0.0);
+                        vec2 fuv = vec2(uv.x, 1.0 - uv.y) * ((1.0) + 2.0 * fscale) - fscale - vec2(-0.0, 0.005);
+                        vec4 f = texture2D(frametexture, fuv * vec2(0.91, 0.8) + vec2(0.050, 0.093));
+                        f.xyz = mix(f.xyz, vec3(0.5, 0.5, 0.5), 0.5);
+                        float fvig = clamp(-0.00 + 512.0 * uv.x * uv.y * (1.0 - uv.x) * (1.0 - uv.y), 0.2, 0.85);
+                        col *= fvig;
+                        col = mix(col, mix(max(col, 0.0), pow(abs(f.xyz), vec3(1.4)), f.w), vec3(use_frame));
+
+                        color = vec4(col, 1.0);
+                    }
+
+                            ) /* STR */;
+
+            //--------------------------------------------------------------------------------
+
+
+    if (shadermode == 1) {
+        crtemu->crt_shader = crtemu_internal_build_shader(crtemu, vs_source, crt_fs_source);
+    }
+    else if (shadermode == 2) {
+        crtemu->crt_shader = crtemu_internal_build_shader(crtemu, vs_source, crt_fs_source2);
+    }
+    else if (shadermode == 3) {
+        crtemu->crt_shader = crtemu_internal_build_shader(crtemu, vs_source, crt_fs_source3);
+    }
+    else {
+        crtemu->crt_shader = crtemu_internal_build_shader(crtemu, vs_source, crt_fs_source4);
+    }
+	
     if( crtemu->crt_shader == 0 ) goto failed;
 
 	char const* blur_fs_source = 
@@ -774,15 +1210,23 @@ crtemu_t* crtemu_create( void* memctx )
 
     #undef STR
 
+    //ALERT - testing delete textures
+  //  crtemu->glDeleteTextures(1, &crtemu->accumulatetexture_a);
+  //  crtemu->glGenTextures(1, &crtemu->normaltexture);
+  //  crtemu->glGenFramebuffers(1, &crtemu->normaltexture);
+
 	crtemu->glGenTextures( 1, &crtemu->accumulatetexture_a );
 	crtemu->glGenFramebuffers( 1, &crtemu->accumulatebuffer_a );
 
+ //   crtemu->glDeleteTextures(1, &crtemu->accumulatetexture_b);
 	crtemu->glGenTextures( 1, &crtemu->accumulatetexture_b );
 	crtemu->glGenFramebuffers( 1, &crtemu->accumulatebuffer_b );
 
+  //  crtemu->glDeleteTextures(1, &crtemu->blurtexture_a);
 	crtemu->glGenTextures( 1, &crtemu->blurtexture_a );
 	crtemu->glGenFramebuffers( 1, &crtemu->blurbuffer_a );
 
+ //   crtemu->glDeleteTextures(1, &crtemu->blurtexture_b);
 	crtemu->glGenTextures( 1, &crtemu->blurtexture_b );
 	crtemu->glGenFramebuffers( 1, &crtemu->blurbuffer_b );
 
@@ -795,13 +1239,22 @@ crtemu_t* crtemu_create( void* memctx )
     crtemu->glTexParameteri( CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MIN_FILTER, CRTEMU_GL_LINEAR );
     crtemu->glTexParameteri( CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MAG_FILTER, CRTEMU_GL_LINEAR );
 
-    crtemu->glGenTextures( 1, &crtemu->backbuffer ); 
+//    crtemu->glDeleteTextures(1, &crtemu->backbuffer);
+    crtemu->glGenTextures(1, &crtemu->backbuffer);
     crtemu->glEnable( CRTEMU_GL_TEXTURE_2D ); 
     crtemu->glActiveTexture( CRTEMU_GL_TEXTURE0 );
     crtemu->glBindTexture( CRTEMU_GL_TEXTURE_2D, crtemu->backbuffer );
     crtemu->glTexParameteri( CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MIN_FILTER, CRTEMU_GL_NEAREST );
     crtemu->glTexParameteri( CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MAG_FILTER, CRTEMU_GL_NEAREST );
 
+ /*   crtemu->glGenTextures(1, &crtemu->normaltexture);
+    crtemu->glEnable(CRTEMU_GL_TEXTURE_2D);
+    crtemu->glActiveTexture(CRTEMU_GL_TEXTURE0);
+    crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->normaltexture);
+    crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MIN_FILTER, CRTEMU_GL_NEAREST);
+    crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MAG_FILTER, CRTEMU_GL_NEAREST);*/
+
+ //   crtemu->glDeleteTextures(1, &crtemu->vertexbuffer);
     crtemu->glGenBuffers( 1, &crtemu->vertexbuffer );
 	crtemu->glBindBuffer( CRTEMU_GL_ARRAY_BUFFER, crtemu->vertexbuffer );
 	crtemu->glEnableVertexAttribArray( 0 );
@@ -1036,12 +1489,16 @@ void crtemu_present(crtemu_t* crtemu, CRTEMU_U64 time_us, CRTEMU_U32 const* pixe
     //int viewportx = 40;
     crtemu->glViewport(viewportx, 0, viewportwidth, height);
 
-    //crtemu->glViewport(viewportx, 0, 400, 300);
-    //crtemu->glViewport(0, 0, 400, 300);
+
 
 
     //THIS CAUSES GHOSTING ISSUES WITH MY WIDESCREEN MOD, I DONT HAVE THE ENERGY TO FIGURE OUT WHY
     // Blur the previous accumulation buffer
+    /*if (crtemu->shadermode == 1) {
+        crtemu_internal_blur(crtemu, crtemu->accumulatetexture_b, crtemu->blurbuffer_a, crtemu->blurbuffer_b, crtemu->blurtexture_b, 1.0f, width, height);
+        crtemu_internal_blur(crtemu, crtemu->accumulatetexture_b, crtemu->blurbuffer_a, crtemu->blurbuffer_b, crtemu->blurtexture_b, 1.0f, viewportwidth, height);
+
+    }*/
     //crtemu_internal_blur(crtemu, crtemu->accumulatetexture_b, crtemu->blurbuffer_a, crtemu->blurbuffer_b, crtemu->blurtexture_b, 1.0f, width, height);
     //crtemu_internal_blur(crtemu, crtemu->accumulatetexture_b, crtemu->blurbuffer_a, crtemu->blurbuffer_b, crtemu->blurtexture_b, 1.0f, viewportwidth, height);
 
@@ -1131,6 +1588,12 @@ void crtemu_present(crtemu_t* crtemu, CRTEMU_U64 time_us, CRTEMU_U32 const* pixe
         window_width = (int)(scaled_h * (width_multiplier / height_multiplier));
     } 
 
+    //gonna use this to fill the screen
+    if ((crtemu->shadermode == 3) || (crtemu->shadermode == 4)) {
+        window_height = window_height * 1.1f;
+        window_width = window_width * 1.1f;
+    }
+    
     
  
     float hborder = ( ( viewport[ 2 ] - viewport[ 0 ] ) - window_width ) / 2.0f;
@@ -1216,6 +1679,351 @@ void crtemu_present(crtemu_t* crtemu, CRTEMU_U64 time_us, CRTEMU_U32 const* pixe
     crtemu->glBindTexture( CRTEMU_GL_TEXTURE_2D, 1 );   
     crtemu->glBindTexture( CRTEMU_GL_TEXTURE_2D, 2 );   
     crtemu->glBindFramebuffer( CRTEMU_GL_FRAMEBUFFER, 0 ); 
+    }
+
+    //working on
+    void crtemu_present_aux(crtemu_t* crtemu, CRTEMU_U64 time_us, CRTEMU_U32 const* pixels_xbgr, int width, int height, int framewidth, int frameheight,
+        CRTEMU_U32 mod_xbgr, CRTEMU_U32 border_xbgr)
+    {
+        //std::cout << "input vars: " << width << " " << height << framewidth << " " << frameheight;
+
+        float width_multiplier;
+        float height_multiplier;
+        //float hborder_multiplier;
+        float width_viewport_multiplier;
+        //8:5
+        //4:5
+        if ((framewidth / 16.0f) == (frameheight / 9.0f)) {
+            width_multiplier = 16.0f;
+            height_multiplier = 9.0f;
+
+            //hborder_multiplier = 1.66667f;
+            width_viewport_multiplier = 0.75f;
+            //hborder_multiplier = 4.0f;
+        }
+        else if ((framewidth / 16.0f) == (frameheight / 10.0f)) {
+            width_multiplier = 16.0f;
+            height_multiplier = 10.0f;
+
+
+            //hborder_multiplier = 1.4f;
+            width_viewport_multiplier = (5.0f / 6.0f);
+        }
+        else {
+            width_multiplier = 4.0f;
+            height_multiplier = 3.0f;
+            //hborder_multiplier = 1.0f;
+            width_viewport_multiplier = 1.0f;
+        }
+
+        int viewportwidth;
+
+        int viewportx;
+
+        //viewportwidth = width;
+
+        //viewportwidth = width - abs((height * (4.0f / 3.0f)) - width);
+
+        float viewportwidth_multiplier = 1.0f;
+        if (framewidth != frameheight) {
+            if ((width > 0) && (height > 0)) {
+                if (((float)width / (float)height) == (16.0f / 10.0f)) {
+                    viewportwidth_multiplier = (6.0f / 5.0f);
+                }
+                else {
+                    if (((float)width / (float)height) == (4.0f / 3.0f)) {
+                        //lookin' very good
+                        //viewportwidth_multiplier = (12.0f / 11.0f);
+
+
+                        viewportwidth_multiplier = 1.0f;
+
+                        //viewportwidth_multiplier = (54.0f / 55.0f);
+
+                        //viewportwidth_multiplier = (10.0f / 9.0f);
+
+                        //viewportwidth_multiplier = 1.0f;
+                        //viewportwidth_multiplier = (4.3f / 3.6f);
+                    }
+                    else {
+                        viewportwidth_multiplier = (4.0f / 3.0f);
+                    }
+                }
+            }
+            viewportwidth = (height * viewportwidth_multiplier);
+            viewportx = round((float)(abs((float)viewportwidth - (float)width)) / 2.0f) + 2.0f;
+        }
+        else {
+            viewportwidth = width;
+            viewportx = 0;
+        }
+
+
+
+
+
+
+        //viewportx = 0;
+        //viewportwidth = viewportwidth - viewportx;
+        int viewport[4];
+        crtemu->glGetIntegerv(CRTEMU_GL_VIEWPORT, viewport);
+
+        //width = viewportwidth;
+
+
+        if (width != crtemu->last_present_width || height != crtemu->last_present_height)
+        {
+            crtemu->glActiveTexture(CRTEMU_GL_TEXTURE0);
+
+           /* crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->normaltexture);
+            crtemu->glTexImage2D(CRTEMU_GL_TEXTURE_2D, 0, CRTEMU_GL_RGB, width, height, 0, CRTEMU_GL_RGB, CRTEMU_GL_UNSIGNED_BYTE, 0);
+            crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, crtemu->normaltexture);
+            crtemu->glFramebufferTexture2D(CRTEMU_GL_FRAMEBUFFER, CRTEMU_GL_COLOR_ATTACHMENT0, CRTEMU_GL_TEXTURE_2D, crtemu->normaltexture, 0);
+            crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, 0);*/
+
+            crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->accumulatetexture_a);
+            crtemu->glTexImage2D(CRTEMU_GL_TEXTURE_2D, 0, CRTEMU_GL_RGB, width, height, 0, CRTEMU_GL_RGB, CRTEMU_GL_UNSIGNED_BYTE, 0);
+            crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, crtemu->accumulatebuffer_a);
+            crtemu->glFramebufferTexture2D(CRTEMU_GL_FRAMEBUFFER, CRTEMU_GL_COLOR_ATTACHMENT0, CRTEMU_GL_TEXTURE_2D, crtemu->accumulatetexture_a, 0);
+            crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, 0);
+
+            /*crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->accumulatetexture_b);
+            crtemu->glTexImage2D(CRTEMU_GL_TEXTURE_2D, 0, CRTEMU_GL_RGB, width, height, 0, CRTEMU_GL_RGB, CRTEMU_GL_UNSIGNED_BYTE, 0);
+            crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, crtemu->accumulatebuffer_b);
+            crtemu->glFramebufferTexture2D(CRTEMU_GL_FRAMEBUFFER, CRTEMU_GL_COLOR_ATTACHMENT0, CRTEMU_GL_TEXTURE_2D, crtemu->accumulatetexture_b, 0);
+            crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, 0);*/
+
+        /*    crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->blurtexture_a);
+            crtemu->glTexImage2D(CRTEMU_GL_TEXTURE_2D, 0, CRTEMU_GL_RGB, width, height, 0, CRTEMU_GL_RGB, CRTEMU_GL_UNSIGNED_BYTE, 0);
+            crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, crtemu->blurbuffer_a);
+            crtemu->glFramebufferTexture2D(CRTEMU_GL_FRAMEBUFFER, CRTEMU_GL_COLOR_ATTACHMENT0, CRTEMU_GL_TEXTURE_2D, crtemu->blurtexture_a, 0);
+            crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, 0);
+
+            crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->blurtexture_b);
+            crtemu->glTexImage2D(CRTEMU_GL_TEXTURE_2D, 0, CRTEMU_GL_RGB, width, height, 0, CRTEMU_GL_RGB, CRTEMU_GL_UNSIGNED_BYTE, 0);
+            crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, crtemu->blurbuffer_b);
+            crtemu->glFramebufferTexture2D(CRTEMU_GL_FRAMEBUFFER, CRTEMU_GL_COLOR_ATTACHMENT0, CRTEMU_GL_TEXTURE_2D, crtemu->blurtexture_b, 0);
+            crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, 0);*/
+        }
+
+
+        crtemu->last_present_width = width;
+        crtemu->last_present_height = height;
+
+        {
+            float x1 = -1.0f, y1 = -1.0f, x2 = 1.0f, y2 = 1.0f;
+
+            CRTEMU_GLfloat vertices[] =
+            {
+            x1, y1, 0.0f, 0.0f,
+            x2, y1, 1.0f, 0.0f,
+            x2, y2, 1.0f, 1.0f,
+            x1, y2, 0.0f, 1.0f,
+            };
+            crtemu->glBufferData(CRTEMU_GL_ARRAY_BUFFER, 4 * 4 * sizeof(CRTEMU_GLfloat), vertices, CRTEMU_GL_STATIC_DRAW);
+            crtemu->glBindBuffer(CRTEMU_GL_ARRAY_BUFFER, crtemu->vertexbuffer);
+        }
+
+        // Copy to backbuffer
+        crtemu->glActiveTexture(CRTEMU_GL_TEXTURE0);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->backbuffer);
+     //   crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->normaltexture);
+        //ALERT - TESTING
+        crtemu->glTexImage2D(CRTEMU_GL_TEXTURE_2D, 0, CRTEMU_GL_RGBA, width, height, 0, CRTEMU_GL_RGBA, CRTEMU_GL_UNSIGNED_BYTE, pixels_xbgr);
+     //   crtemu->glTexImage2D(CRTEMU_GL_TEXTURE_2D, 0, CRTEMU_GL_RGBA8, width, height, 0, CRTEMU_GL_BGRA_EXT, CRTEMU_GL_UNSIGNED_BYTE, pixels_xbgr);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, 0);
+
+
+        //int viewportx = 40;
+        crtemu->glViewport(viewportx, 0, viewportwidth, height);
+
+
+
+
+        //THIS CAUSES GHOSTING ISSUES WITH MY WIDESCREEN MOD, I DONT HAVE THE ENERGY TO FIGURE OUT WHY
+        // Blur the previous accumulation buffer
+        //crtemu_internal_blur(crtemu, crtemu->accumulatetexture_b, crtemu->blurbuffer_a, crtemu->blurbuffer_b, crtemu->blurtexture_b, 1.0f, width, height);
+        //crtemu_internal_blur(crtemu, crtemu->accumulatetexture_b, crtemu->blurbuffer_a, crtemu->blurbuffer_b, crtemu->blurtexture_b, 1.0f, viewportwidth, height);
+
+        // Update accumulation buffer
+      //  crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, crtemu->accumulatebuffer_a);
+        /*crtemu->glUseProgram(crtemu->accumulate_shader);
+        crtemu->glUniform1i(crtemu->glGetUniformLocation(crtemu->accumulate_shader, "tex0"), 0);
+        crtemu->glUniform1i(crtemu->glGetUniformLocation(crtemu->accumulate_shader, "tex1"), 1);
+        crtemu->glUniform1f(crtemu->glGetUniformLocation(crtemu->accumulate_shader, "modulate"), 1.0f);*/
+        crtemu->glActiveTexture(CRTEMU_GL_TEXTURE0);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->backbuffer);
+    //    crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->normaltexture);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MIN_FILTER, CRTEMU_GL_LINEAR);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MAG_FILTER, CRTEMU_GL_LINEAR);
+        crtemu->glActiveTexture(CRTEMU_GL_TEXTURE1);
+        /*crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->blurtexture_a);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MIN_FILTER, CRTEMU_GL_LINEAR);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MAG_FILTER, CRTEMU_GL_LINEAR);*/
+        crtemu->glDrawArrays(CRTEMU_GL_TRIANGLE_FAN, 0, 4);
+        crtemu->glActiveTexture(CRTEMU_GL_TEXTURE0);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, 0);
+        crtemu->glActiveTexture(CRTEMU_GL_TEXTURE1);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, 0);
+        crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, 0);
+
+
+        // Store a copy of the accumulation buffer
+    //    crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, crtemu->accumulatebuffer_b);
+        crtemu->glUseProgram(crtemu->copy_shader);
+        crtemu->glUniform1i(crtemu->glGetUniformLocation(crtemu->copy_shader, "tex0"), 0);
+        crtemu->glActiveTexture(CRTEMU_GL_TEXTURE0);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->accumulatetexture_a);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MIN_FILTER, CRTEMU_GL_LINEAR);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MAG_FILTER, CRTEMU_GL_LINEAR);
+        crtemu->glDrawArrays(CRTEMU_GL_TRIANGLE_FAN, 0, 4);
+        crtemu->glActiveTexture(CRTEMU_GL_TEXTURE0);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, 0);
+        crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, 0);
+
+        // Blend accumulation and backbuffer
+        crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, crtemu->accumulatebuffer_a);
+        /*
+        crtemu->glUseProgram(crtemu->blend_shader);
+        crtemu->glUniform1i(crtemu->glGetUniformLocation(crtemu->blend_shader, "tex0"), 0);
+        crtemu->glUniform1i(crtemu->glGetUniformLocation(crtemu->blend_shader, "tex1"), 1);
+        crtemu->glUniform1f(crtemu->glGetUniformLocation(crtemu->blend_shader, "modulate"), 1.0f);*/
+
+        crtemu->glActiveTexture(CRTEMU_GL_TEXTURE0);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->backbuffer);
+     //   crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->normaltexture);
+     /*   crtemu->glActiveTexture(CRTEMU_GL_TEXTURE1);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->accumulatetexture_b);*/
+        crtemu->glDrawArrays(CRTEMU_GL_TRIANGLE_FAN, 0, 4);
+        crtemu->glActiveTexture(CRTEMU_GL_TEXTURE0);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, 0);
+        crtemu->glActiveTexture(CRTEMU_GL_TEXTURE1);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, 0);
+        crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, 0);
+
+
+        // Add slight blur to backbuffer
+        //crtemu_internal_blur(crtemu, crtemu->accumulatetexture_a, crtemu->accumulatebuffer_a, crtemu->blurbuffer_b, crtemu->blurtexture_b, 0.17f, width, height);
+        //crtemu_internal_blur(crtemu, crtemu->accumulatetexture_a, crtemu->accumulatebuffer_a, crtemu->blurbuffer_b, crtemu->blurtexture_b, 0.17f, viewportwidth, height);
+
+        // Create fully blurred version of backbuffer
+        //crtemu_internal_blur(crtemu, crtemu->accumulatetexture_a, crtemu->blurbuffer_a, crtemu->blurbuffer_b, crtemu->blurtexture_b, 1.0f, width, height);
+        //crtemu_internal_blur(crtemu, crtemu->accumulatetexture_a, crtemu->blurbuffer_a, crtemu->blurbuffer_b, crtemu->blurtexture_b, 1.0f, viewportwidth, height);
+
+
+        // Present to screen with CRT shader
+        crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, 0);
+
+        crtemu->glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+
+
+        int window_width = viewport[2] - viewport[0];
+        int window_height = viewport[3] - viewport[1];
+
+
+
+        int scaled_w = (int)(window_height * (width_multiplier / height_multiplier));
+        int scaled_h = (int)(window_width * (height_multiplier / width_multiplier));
+
+        if (scaled_h > window_height && scaled_w <= window_width) {
+            window_width = scaled_w;
+            //window_height = (int)( scaled_w * ( 3.0f / 4.3f ) );
+            window_height = (int)(scaled_w * (height_multiplier / width_multiplier));
+        }
+        else if (scaled_w > window_width && scaled_h <= window_height) {
+            window_height = scaled_h;
+            //window_width = (int)( scaled_h * ( 4.3f / 3.0f ) );
+            window_width = (int)(scaled_h * (width_multiplier / height_multiplier));
+        }
+
+
+
+        float hborder = ((viewport[2] - viewport[0]) - window_width) / 2.0f;
+        float vborder = ((viewport[3] - viewport[1]) - window_height) / 2.0f;
+
+        float x1 = hborder;
+        float y1 = vborder;
+        float x2 = x1 + window_width;
+        float y2 = y1 + window_height;
+
+        x1 = (x1 / (viewport[2] - viewport[0])) * 2.0f - 1.0f;
+        x2 = (x2 / (viewport[2] - viewport[0])) * 2.0f - 1.0f;
+        y1 = (y1 / (viewport[3] - viewport[1])) * 2.0f - 1.0f;
+        y2 = (y2 / (viewport[3] - viewport[1])) * 2.0f - 1.0f;
+
+        CRTEMU_GLfloat screen_vertices[] =
+        {
+        0.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 1.0f,
+        0.0f, 0.0f, 0.0f, 1.0f,
+        };
+        screen_vertices[0] = x1;
+        screen_vertices[1] = y1;
+        screen_vertices[4] = x2;
+        screen_vertices[5] = y1;
+        screen_vertices[8] = x2;
+        screen_vertices[9] = y2;
+        screen_vertices[12] = x1;
+        screen_vertices[13] = y2;
+
+        crtemu->glBufferData(CRTEMU_GL_ARRAY_BUFFER, 4 * 4 * sizeof(CRTEMU_GLfloat), screen_vertices, CRTEMU_GL_STATIC_DRAW);
+        crtemu->glBindBuffer(CRTEMU_GL_ARRAY_BUFFER, crtemu->vertexbuffer);
+
+        float r = ((border_xbgr >> 16) & 0xff) / 255.0f;
+        float g = ((border_xbgr >> 8) & 0xff) / 255.0f;
+        float b = ((border_xbgr) & 0xff) / 255.0f;
+        crtemu->glClearColor(r, g, b, 1.0f);
+        crtemu->glClear(CRTEMU_GL_COLOR_BUFFER_BIT);
+
+        //this does the crt stuff
+        crtemu->glUseProgram(crtemu->crt_shader);
+        //this has the gameplay but it still has a crt effect
+     //   crtemu->glUniform1i(crtemu->glGetUniformLocation(crtemu->crt_shader, "backbuffer"), 0);
+     //   crtemu->glUniform1i(crtemu->glGetUniformLocation(crtemu->crt_shader, "normaltexture"), 0);
+    //    crtemu->glUniform1i(crtemu->glGetUniformLocation(crtemu->crt_shader, "blurbuffer"), 1);
+        crtemu->glUniform1i(crtemu->glGetUniformLocation(crtemu->crt_shader, "frametexture"), 2);
+        crtemu->glUniform1f(crtemu->glGetUniformLocation(crtemu->crt_shader, "use_frame"), crtemu->use_frame);
+    //    crtemu->glUniform1f(crtemu->glGetUniformLocation(crtemu->crt_shader, "time"), 1.5f * (CRTEMU_GLfloat)(((double)time_us) / 1000000.0));
+        crtemu->glUniform2f(crtemu->glGetUniformLocation(crtemu->crt_shader, "resolution"), (float)window_width, (float)window_height);
+
+        float mod_r = ((mod_xbgr >> 16) & 0xff) / 255.0f;
+        float mod_g = ((mod_xbgr >> 8) & 0xff) / 255.0f;
+        float mod_b = ((mod_xbgr) & 0xff) / 255.0f;
+    //    crtemu->glUniform3f(crtemu->glGetUniformLocation(crtemu->crt_shader, "modulate"), mod_r, mod_g, mod_b);
+
+        float color[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        crtemu->glActiveTexture(CRTEMU_GL_TEXTURE0);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->accumulatetexture_a);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MIN_FILTER, CRTEMU_GL_LINEAR);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MAG_FILTER, CRTEMU_GL_LINEAR);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_WRAP_S, CRTEMU_GL_CLAMP_TO_BORDER);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_WRAP_T, CRTEMU_GL_CLAMP_TO_BORDER);
+        crtemu->glTexParameterfv(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_BORDER_COLOR, color);
+
+        /*crtemu->glActiveTexture(CRTEMU_GL_TEXTURE1);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->blurtexture_a);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MIN_FILTER, CRTEMU_GL_LINEAR);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MAG_FILTER, CRTEMU_GL_LINEAR);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_WRAP_S, CRTEMU_GL_CLAMP_TO_BORDER);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_WRAP_T, CRTEMU_GL_CLAMP_TO_BORDER);
+        crtemu->glTexParameterfv(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_BORDER_COLOR, color);*/
+
+        crtemu->glActiveTexture(CRTEMU_GL_TEXTURE3);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, crtemu->frametexture);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MIN_FILTER, CRTEMU_GL_LINEAR);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_MAG_FILTER, CRTEMU_GL_LINEAR);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_WRAP_S, CRTEMU_GL_CLAMP_TO_BORDER);
+        crtemu->glTexParameteri(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_WRAP_T, CRTEMU_GL_CLAMP_TO_BORDER);
+        crtemu->glTexParameterfv(CRTEMU_GL_TEXTURE_2D, CRTEMU_GL_TEXTURE_BORDER_COLOR, color);
+
+        crtemu->glDrawArrays(CRTEMU_GL_TRIANGLE_FAN, 0, 4);
+
+        crtemu->glActiveTexture(CRTEMU_GL_TEXTURE0);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, 0);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, 1);
+        crtemu->glBindTexture(CRTEMU_GL_TEXTURE_2D, 2);
+        crtemu->glBindFramebuffer(CRTEMU_GL_FRAMEBUFFER, 0);
     }
 
 #endif /* CRTEMU_IMPLEMENTATION */

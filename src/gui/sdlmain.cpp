@@ -23,6 +23,9 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <fstream>
+//this for cout
+#include <iostream>
 #include <stdio.h>
 #include <unistd.h>
 #include <stdarg.h>
@@ -248,6 +251,63 @@ bool startup_state_numlock = false;
 bool startup_state_capslock = false;
 const unsigned char* crt_frame_to_use;
 int framewidth, frameheight;
+bool using_filter = false;
+int shadermode;
+
+struct crtemu_config {
+	std::string frame;
+	bool crt_effect;
+	bool big_frame;
+	bool use_filter;
+};
+
+std::vector<std::string> splitString(std::string s, std::string delimiter) {
+	size_t pos_start = 0, pos_end, delim_len = delimiter.length();
+	std::string token;
+	std::vector<std::string> res;
+	while ((pos_end = s.find(delimiter, pos_start)) != std::string::npos) {
+		token = s.substr(pos_start, pos_end - pos_start);
+		pos_start = pos_end + delim_len;
+		res.push_back(token);
+	}
+	res.push_back(s.substr(pos_start));
+	return res;
+}
+
+//dont care how silly this is, just want an easy way to load up a custom config file
+bool load_crtemu_conf(std::string filename, crtemu_config& crtconfig) {
+
+	std::ifstream is_file(filename);
+	if (is_file.is_open()) {
+		std::string line;
+		while (std::getline(is_file, line)) {
+			std::vector<std::string> kv = splitString(line.c_str(), "=");
+			//std::cout << "key: " << kv[0] << "\n";
+			//std::cout << "value: " << kv[1] << "\n";
+			//printf("line: %s", line.c_str());
+			//std::cout << "\n";
+
+			//disgusting if chain
+			if (kv[0]=="frame") {
+				crtconfig.frame = kv[1];
+			}
+			else if (kv[0] == "crt_effect") {
+				crtconfig.crt_effect = (kv[1]=="true");
+			}
+			else if (kv[0] == "big_frame") {
+				crtconfig.big_frame = (kv[1] == "true");
+			}
+			else if (kv[0] == "use_filter") {
+				return (kv[1] == "true");
+			}
+		}
+		is_file.close();
+		return true;
+	}
+	else {
+		return false;
+	}
+}
 
 
 bool load_image(std::vector<unsigned char>& image, const std::string& filename, int& x, int& y, unsigned char*& chararr, unsigned int& chararrsize)
@@ -959,7 +1019,7 @@ int crt_thread(void* user_data) {
 
 
 
-	crtemu = crtemu_create(0);
+	crtemu = crtemu_create(0, shadermode);
 	if (crtemu) crtemu_frame(crtemu, (CRTEMU_U32*)crt_frame_to_use, framewidth, frameheight /*1024, 1024*/);
 
 	UINT64 clock_freq;
@@ -1019,7 +1079,7 @@ int crt_thread(void* user_data) {
 				glctx = wglCreateContext(context->hdc);
 				if (!glctx) goto again;
 				wglMakeCurrent(context->hdc, glctx);
-				crtemu = crtemu_create(0);
+				crtemu = crtemu_create(0, shadermode);
 				crtemu_frame(crtemu, (CRTEMU_U32*)crt_frame_to_use, framewidth, frameheight /*1024, 1024*/);
 			}
 		}
@@ -1173,58 +1233,65 @@ void GFX_EndUpdate(const Bit16u * changedLines) {
 #if C_OPENGL
 	case SCREEN_OPENGL:
 	{
-		//glCallList(sdl.opengl.displaylist);
-		int time = GetTicks();
-		if (crt_context.mutex)
-		{
-			SDL_LockMutex(crt_context.mutex);
-			if (crt_context.capacity < (sdl.opengl.pitch / 4) * sdl.draw.height * sizeof(uint32_t))
+
+		if (using_filter) {
+			//glCallList(sdl.opengl.displaylist);
+			int time = GetTicks();
+			if (crt_context.mutex)
 			{
-				crt_context.capacity = (sdl.opengl.pitch / 4) * sdl.draw.height * sizeof(uint32_t) * 2;
-				crt_context.pixels = (Bit8u*)realloc(crt_context.pixels, crt_context.capacity);
+				SDL_LockMutex(crt_context.mutex);
+				if (crt_context.capacity < (sdl.opengl.pitch / 4) * sdl.draw.height * sizeof(uint32_t))
+				{
+					crt_context.capacity = (sdl.opengl.pitch / 4) * sdl.draw.height * sizeof(uint32_t) * 2;
+					crt_context.pixels = (Bit8u*)realloc(crt_context.pixels, crt_context.capacity);
+				}
+				memcpy(crt_context.pixels, sdl.opengl.framebuf, (sdl.opengl.pitch / 4) * sdl.draw.height * sizeof(uint32_t));
+				crt_context.width = sdl.opengl.pitch / 4;
+				crt_context.height = sdl.draw.height;
+				crt_context.gl_context = wglGetCurrentContext();
+				crt_context.hdc = wglGetCurrentDC();
+				SDL_UnlockMutex(crt_context.mutex);
+
 			}
-			memcpy(crt_context.pixels, sdl.opengl.framebuf, (sdl.opengl.pitch / 4) * sdl.draw.height * sizeof(uint32_t));
-			crt_context.width = sdl.opengl.pitch / 4;
-			crt_context.height = sdl.draw.height;
-			crt_context.gl_context = wglGetCurrentContext();
-			crt_context.hdc = wglGetCurrentDC();
-			SDL_UnlockMutex(crt_context.mutex);
 
+			//		if( crtemu && pixels )
+			//			crtemu_present( crtemu, (CRTEMU_U64) time, (CRTEMU_U32 const*) pixels, sdl.opengl.pitch / 4, sdl.draw.height, 0xffffffff, 0xff000000 );
+			//		SDL_GL_SwapBuffers();
 		}
-
-		//		if( crtemu && pixels )
-		//			crtemu_present( crtemu, (CRTEMU_U64) time, (CRTEMU_U32 const*) pixels, sdl.opengl.pitch / 4, sdl.draw.height, 0xffffffff, 0xff000000 );
-		//		SDL_GL_SwapBuffers();
-
-		/*#if defined(NVIDIA_PixelDataRange)
-				if (sdl.opengl.pixel_data_range) {
-					glBindTexture(GL_TEXTURE_2D, sdl.opengl.texture);
-					glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
-							sdl.draw.width, sdl.draw.height, GL_BGRA_EXT,
-							GL_UNSIGNED_INT_8_8_8_8_REV, sdl.opengl.framebuf);
-					glCallList(sdl.opengl.displaylist);
-					SDL_GL_SwapBuffers();
-				} else
-		#endif
+		else {
+#if defined(NVIDIA_PixelDataRange)
+			if (sdl.opengl.pixel_data_range) {
+				glBindTexture(GL_TEXTURE_2D, sdl.opengl.texture);
+				glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+					sdl.draw.width, sdl.draw.height, GL_BGRA_EXT,
+					GL_UNSIGNED_INT_8_8_8_8_REV, sdl.opengl.framebuf);
+				glCallList(sdl.opengl.displaylist);
+				SDL_GL_SwapBuffers();
+			}
+			else
+#endif
 				if (changedLines) {
 					Bitu y = 0, index = 0;
 					glBindTexture(GL_TEXTURE_2D, sdl.opengl.texture);
 					while (y < sdl.draw.height) {
 						if (!(index & 1)) {
 							y += changedLines[index];
-						} else {
-							Bit8u *pixels = (Bit8u *)sdl.opengl.framebuf + y * sdl.opengl.pitch;
+						}
+						else {
+							Bit8u* pixels = (Bit8u*)sdl.opengl.framebuf + y * sdl.opengl.pitch;
 							Bitu height = changedLines[index];
 							glTexSubImage2D(GL_TEXTURE_2D, 0, 0, y,
 								sdl.draw.width, height, GL_BGRA_EXT,
-								GL_UNSIGNED_INT_8_8_8_8_REV, pixels );
+								GL_UNSIGNED_INT_8_8_8_8_REV, pixels);
 							y += height;
 						}
 						index++;
 					}
 					glCallList(sdl.opengl.displaylist);
 					SDL_GL_SwapBuffers();
-				}*/
+				}
+		}
+
 	}break;
 #endif
 	default:
@@ -1283,27 +1350,30 @@ void GFX_Stop() {
 
 void GFX_Start() {
 	sdl.active = true;
-	if (sdl.desktop.fullscreen)
-	{
-		RECT rect;
-		GetClientRect(GetDesktopWindow(), &rect);
-		int height = rect.bottom - rect.top;
-		int width = rect.right - rect.left;
-
-		int newwidth = (int)((float)height * (4.0f / 3.0f));
-		int hborder = (int)((float)(abs(width - newwidth)) / 2.0f);
-		//glViewport(0, 0, rect.right - rect.left, rect.bottom - rect.top);
-
-		glViewport(hborder, 0, newwidth, height);
-	}
-	if (!crtemu)
+	if (using_filter) {
+		if (sdl.desktop.fullscreen)
 		{
-		crt_context.hdc = wglGetCurrentDC();
-		crt_context.gl_context = wglGetCurrentContext();
-		crt_context.mutex = SDL_CreateMutex();
-		crt_context.running = true;
-		crt_thread_ptr = SDL_CreateThread( crt_thread, &crt_context );
+			RECT rect;
+			GetClientRect(GetDesktopWindow(), &rect);
+			int height = rect.bottom - rect.top;
+			int width = rect.right - rect.left;
+
+			int newwidth = (int)((float)height * (4.0f / 3.0f));
+			int hborder = (int)((float)(abs(width - newwidth)) / 2.0f);
+			//glViewport(0, 0, rect.right - rect.left, rect.bottom - rect.top);
+
+			glViewport(hborder, 0, newwidth, height);
 		}
+		if (!crtemu)
+		{
+			crt_context.hdc = wglGetCurrentDC();
+			crt_context.gl_context = wglGetCurrentContext();
+			crt_context.mutex = SDL_CreateMutex();
+			crt_context.running = true;
+			crt_thread_ptr = SDL_CreateThread(crt_thread, &crt_context);
+		}
+	}
+
 }
 
 static void GUI_ShutDown(Section* /*sec*/) {
@@ -1392,22 +1462,47 @@ static void OutputString(Bitu x, Bitu y, const char* text, Bit32u color, Bit32u 
 void Restart(bool pressed);
 
 static void GUI_StartUp(Section * sec) {
-	unsigned char* chararr;
-	unsigned int chararrsize;
-	std::string filename = "crt_frame.png";
 
+	crtemu_config crtconfig;
+	using_filter = load_crtemu_conf("crtemu.conf", crtconfig);
 
-	std::vector<unsigned char> image;
-	bool success = load_image(image, filename, framewidth, frameheight, chararr, chararrsize);
-	if (success)
-	{
-		crt_frame_to_use = chararr;
+	if (using_filter) {
+		if (crtconfig.crt_effect) {
+			if (crtconfig.big_frame) {
+				shadermode = 1;
+			}
+			else {
+				shadermode = 4;
+			}
+			
+		}
+		else {
+			//shadermode = 2;
+			if (crtconfig.big_frame) {
+				shadermode = 2;
+			}
+			else {
+				shadermode = 3;
+			}
+		}
+		unsigned char* chararr;
+		unsigned int chararrsize;
+		//std::string filename = "crt_frame.png";
+		std::string filename = crtconfig.frame;
+
+		std::vector<unsigned char> image;
+		bool success = load_image(image, filename, framewidth, frameheight, chararr, chararrsize);
+		if (success)
+		{
+			crt_frame_to_use = chararr;
+		}
+		else {
+			crt_frame_to_use = a_crt_frame;
+			framewidth = 1024;
+			frameheight = 1024;
+		}
 	}
-	else {
-		crt_frame_to_use = a_crt_frame;
-		framewidth = 1024;
-		frameheight = 1024;
-	}
+
 
 	sec->AddDestroyFunction(&GUI_ShutDown);
 	Section_prop* section = static_cast<Section_prop*>(sec);
