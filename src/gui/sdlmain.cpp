@@ -25,7 +25,7 @@
 #include <string.h>
 #include <fstream>
 //this for cout
-#include <iostream>
+//#include <iostream>
 #include <stdio.h>
 #include <unistd.h>
 #include <stdarg.h>
@@ -1467,24 +1467,7 @@ static void GUI_StartUp(Section * sec) {
 	using_filter = load_crtemu_conf("crtemu.conf", crtconfig);
 
 	if (using_filter) {
-		if (crtconfig.crt_effect) {
-			if (crtconfig.big_frame) {
-				shadermode = 1;
-			}
-			else {
-				shadermode = 4;
-			}
-			
-		}
-		else {
-			//shadermode = 2;
-			if (crtconfig.big_frame) {
-				shadermode = 2;
-			}
-			else {
-				shadermode = 3;
-			}
-		}
+
 		unsigned char* chararr;
 		unsigned int chararrsize;
 		//std::string filename = "crt_frame.png";
@@ -1500,6 +1483,36 @@ static void GUI_StartUp(Section * sec) {
 			crt_frame_to_use = a_crt_frame;
 			framewidth = 1024;
 			frameheight = 1024;
+		}
+
+		if (crtconfig.crt_effect) {
+			if (crtconfig.big_frame) {
+				shadermode = 1;
+			}
+			else {
+				if (framewidth == frameheight) {
+					shadermode = 1;
+				}
+				else {
+					shadermode = 4;
+				}
+
+			}
+
+		}
+		else {
+			//shadermode = 2;
+			if (crtconfig.big_frame) {
+				shadermode = 2;
+			}
+			else {
+				if (framewidth == frameheight) {
+					shadermode = 2;
+				}
+				else {
+					shadermode = 3;
+				}
+			}
 		}
 	}
 
